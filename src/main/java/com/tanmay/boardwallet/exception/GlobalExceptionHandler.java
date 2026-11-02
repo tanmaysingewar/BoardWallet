@@ -65,4 +65,18 @@ public class GlobalExceptionHandler {
 
         return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(response);
     }
+
+    @ExceptionHandler(JoinCodeGenerationException.class)
+    public ResponseEntity<ExceptionResponseDTO> handleJoinCodeGeneration(
+            JoinCodeGenerationException exception) {
+
+        ExceptionResponseDTO response = new ExceptionResponseDTO(
+                HttpStatus.SERVICE_UNAVAILABLE.value(),
+                exception.getMessage()
+        );
+
+        return ResponseEntity
+                .status(HttpStatus.SERVICE_UNAVAILABLE)
+                .body(response);
+    }
 }
