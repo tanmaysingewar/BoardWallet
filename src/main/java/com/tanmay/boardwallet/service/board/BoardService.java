@@ -1,9 +1,6 @@
 package com.tanmay.boardwallet.service.board;
 
-import com.tanmay.boardwallet.dto.board.CreateBoardRequestDTO;
-import com.tanmay.boardwallet.dto.board.CreateBoardResponseDTO;
-import com.tanmay.boardwallet.dto.board.JoinBoardRequestDTO;
-import com.tanmay.boardwallet.dto.board.JoinBoardResponseDTO;
+import com.tanmay.boardwallet.dto.board.*;
 import com.tanmay.boardwallet.exception.JoinCodeGenerationException;
 import com.tanmay.boardwallet.repository.BoardRepository;
 import org.springframework.dao.DataIntegrityViolationException;
@@ -13,6 +10,7 @@ import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.security.SecureRandom;
+import java.util.UUID;
 
 @Service
 public class BoardService {
@@ -20,6 +18,7 @@ public class BoardService {
     private final BoardRepository boardRepository;
     private final BoardCreationService boardCreationService;
     private final BoardJoiningService boardJoiningService;
+    private final BoardDetailsService boardDetailsService;
 
     private static final String JOIN_CODE_CHARACTERS =
             "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
@@ -33,11 +32,13 @@ public class BoardService {
     public BoardService(
             BoardRepository boardRepository,
             BoardCreationService boardCreationService,
-            BoardJoiningService boardJoiningService) {
+            BoardJoiningService boardJoiningService,
+            BoardDetailsService boardDetailsService) {
 
         this.boardRepository = boardRepository;
         this.boardCreationService = boardCreationService;
         this.boardJoiningService = boardJoiningService;
+        this.boardDetailsService = boardDetailsService;
     }
 
     @Transactional(propagation = Propagation.NOT_SUPPORTED)
@@ -92,6 +93,13 @@ public class BoardService {
                 }
             }
         }
+    }
+
+    public BoardDetailsResponseDTO getBoardDetails(
+            UUID boardId,
+            String username) {
+
+        return boardDetailsService.getBoardDetails(boardId, username);
     }
 
     private String generateJoinCode() {
