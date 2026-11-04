@@ -2,6 +2,7 @@ package com.tanmay.boardwallet.exception;
 
 import com.tanmay.boardwallet.dto.validation.ExceptionResponseDTO;
 import com.tanmay.boardwallet.dto.validation.ValidationExceptionResponseDTO;
+import org.springframework.dao.PessimisticLockingFailureException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.authentication.AccountStatusException;
@@ -73,6 +74,44 @@ public class GlobalExceptionHandler {
         ExceptionResponseDTO response = new ExceptionResponseDTO(
                 HttpStatus.SERVICE_UNAVAILABLE.value(),
                 exception.getMessage()
+        );
+
+        return ResponseEntity
+                .status(HttpStatus.SERVICE_UNAVAILABLE)
+                .body(response);
+    }
+
+    @ExceptionHandler(ResourceNotFoundException.class)
+    public ResponseEntity<ExceptionResponseDTO> handleResourceNotFound(
+            ResourceNotFoundException exception) {
+
+        ExceptionResponseDTO response = new ExceptionResponseDTO(
+                HttpStatus.NOT_FOUND.value(),
+                exception.getMessage()
+        );
+
+        return ResponseEntity.status(HttpStatus.NOT_FOUND).body(response);
+    }
+
+    @ExceptionHandler(InvalidBoardStateException.class)
+    public ResponseEntity<ExceptionResponseDTO> handleInvalidBoardState(
+            InvalidBoardStateException exception) {
+
+        ExceptionResponseDTO response = new ExceptionResponseDTO(
+                HttpStatus.CONFLICT.value(),
+                exception.getMessage()
+        );
+
+        return ResponseEntity.status(HttpStatus.CONFLICT).body(response);
+    }
+
+    @ExceptionHandler(PessimisticLockingFailureException.class)
+    public ResponseEntity<ExceptionResponseDTO> handleLockFailure(
+            PessimisticLockingFailureException exception) {
+
+        ExceptionResponseDTO response = new ExceptionResponseDTO(
+                HttpStatus.SERVICE_UNAVAILABLE.value(),
+                "The game is busy. Please try again."
         );
 
         return ResponseEntity

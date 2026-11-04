@@ -2,31 +2,42 @@ package com.tanmay.boardwallet.service.board;
 
 import com.tanmay.boardwallet.dto.board.CreateBoardRequestDTO;
 import com.tanmay.boardwallet.dto.board.CreateBoardResponseDTO;
+import com.tanmay.boardwallet.dto.board.JoinBoardRequestDTO;
+import com.tanmay.boardwallet.dto.board.JoinBoardResponseDTO;
 import com.tanmay.boardwallet.exception.JoinCodeGenerationException;
 import com.tanmay.boardwallet.repository.BoardRepository;
+import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.dao.PessimisticLockingFailureException;
+import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
-import org.springframework.dao.DataIntegrityViolationException;
-import org.springframework.stereotype.Service;
 
 import java.security.SecureRandom;
 
 @Service
 public class BoardService {
+
     private final BoardRepository boardRepository;
-    private final BoardCreationService  boardCreationService;
+    private final BoardCreationService boardCreationService;
+    private final BoardJoiningService boardJoiningService;
 
     private static final String JOIN_CODE_CHARACTERS =
             "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
 
     private static final int JOIN_CODE_LENGTH = 8;
     private static final int MAX_CREATION_ATTEMPTS = 5;
+    private static final int MAX_JOIN_ATTEMPTS = 3;
 
     private final SecureRandom secureRandom = new SecureRandom();
 
-    public BoardService(BoardRepository boardRepository, BoardCreationService boardCreationService) {
+    public BoardService(
+            BoardRepository boardRepository,
+            BoardCreationService boardCreationService,
+            BoardJoiningService boardJoiningService) {
+
         this.boardRepository = boardRepository;
         this.boardCreationService = boardCreationService;
+        this.boardJoiningService = boardJoiningService;
     }
 
     @Transactional(propagation = Propagation.NOT_SUPPORTED)
@@ -59,6 +70,30 @@ public class BoardService {
         );
     }
 
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
+    public JoinBoardResponseDTO joinBoard(
+            JoinBoardRequestDTO request,
+            String username) {
+
+        for (int attempt = 1; true; attempt++) {
+            try {
+                try {
+                    return boardJoiningService.joinOnce(request, username);
+                } catch (DataIntegrityViolationException exception) {
+                    // joinOnce has rolled back before recovery starts.
+                    return boardJoiningService
+                            .findExistingMembership(request, username)
+                            .orElseThrow(() -> exception);
+                }
+            } catch (PessimisticLockingFailureException exception) {
+                // Retry with a fresh transaction after a lock failure.
+                if (attempt >= MAX_JOIN_ATTEMPTS) {
+                    throw exception;
+                }
+            }
+        }
+    }
+
     private String generateJoinCode() {
         char[] code = new char[JOIN_CODE_LENGTH];
 
@@ -69,5 +104,4 @@ public class BoardService {
 
         return new String(code);
     }
-
 }
