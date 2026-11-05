@@ -40,6 +40,7 @@ public class BoardController {
 
         return ResponseEntity.ok(response);
     }
+
     @GetMapping("/{boardId}")
     public ResponseEntity<BoardDetailsResponseDTO> getBoardDetails(
             @PathVariable("boardId") UUID boardId,
@@ -47,6 +48,20 @@ public class BoardController {
 
         BoardDetailsResponseDTO response =
                 boardService.getBoardDetails(
+                        boardId,
+                        authentication.getName()
+                );
+
+        return ResponseEntity.ok(response);
+    }
+
+    @PostMapping("/{boardId}/start")
+    public ResponseEntity<BoardDetailsResponseDTO> startBoard(
+            @PathVariable("boardId") UUID boardId,
+            Authentication authentication) {
+
+        BoardDetailsResponseDTO response =
+                boardService.startBoard(
                         boardId,
                         authentication.getName()
                 );
