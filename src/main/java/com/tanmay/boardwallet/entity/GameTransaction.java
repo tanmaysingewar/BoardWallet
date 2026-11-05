@@ -11,7 +11,15 @@ import java.time.Instant;
 import java.util.UUID;
 
 @Entity
-@Table(name = "game_transaction")
+@Table(
+        name = "game_transaction",
+        uniqueConstraints = {
+                @UniqueConstraint(
+                        name = "uk_transaction_user_idempotency",
+                        columnNames = {"initiated_by", "idempotency_key"}
+                )
+        }
+)
 public class GameTransaction {
 
     @Id
@@ -54,6 +62,12 @@ public class GameTransaction {
     @JoinColumn(name = "initiated_by", nullable = false, updatable = false)
     private User initiatedBy;
 
+    @Column(name = "idempotency_key", updatable = false)
+    private UUID idempotencyKey;
+
+    @Column(name = "request_hash", length = 64, updatable = false)
+    private String requestHash;
+
     @Column(nullable = false, updatable = false)
     private Instant createdAt;
 
@@ -75,6 +89,32 @@ public class GameTransaction {
         this.amount = amount;
         this.reason = reason;
         this.initiatedBy = initiatedBy;
+    }
+
+    public GameTransaction(
+            Board board,
+            Wallet fromWallet,
+            Wallet toWallet,
+            BigDecimal amount,
+            TransactionReason reason,
+            User initiatedBy,
+            UUID idempotencyKey,
+            String requestHash) {
+
+        this(board, fromWallet, toWallet, amount, reason, initiatedBy);
+
+        if (idempotencyKey == null) {
+            throw new IllegalArgumentException("Idempotency key is required");
+        }
+
+        if (requestHash == null || !requestHash.matches("[0-9a-f]{64}")) {
+            throw new IllegalArgumentException(
+                    "Request hash must be a lowercase SHA-256 hash"
+            );
+        }
+
+        this.idempotencyKey = idempotencyKey;
+        this.requestHash = requestHash;
     }
 
     @PrePersist
@@ -112,5 +152,13 @@ public class GameTransaction {
 
     public Instant getCreatedAt() {
         return createdAt;
+    }
+
+    public UUID getIdempotencyKey() {
+        return idempotencyKey;
+    }
+
+    public String getRequestHash() {
+        return requestHash;
     }
 }

@@ -130,4 +130,28 @@ public class GlobalExceptionHandler {
 
         return ResponseEntity.status(HttpStatus.FORBIDDEN).body(response);
     }
+
+    @ExceptionHandler(InvalidPaymentException.class)
+    public ResponseEntity<ExceptionResponseDTO> handleInvalidPayment(
+            InvalidPaymentException exception) {
+
+        ExceptionResponseDTO response = new ExceptionResponseDTO(
+                HttpStatus.BAD_REQUEST.value(),
+                exception.getMessage()
+        );
+
+        return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(response);
+    }
+
+    @ExceptionHandler(IdempotencyConflictException.class)
+    public ResponseEntity<ExceptionResponseDTO> handleIdempotencyConflict(
+            IdempotencyConflictException exception) {
+
+        ExceptionResponseDTO response = new ExceptionResponseDTO(
+                HttpStatus.CONFLICT.value(),
+                exception.getMessage()
+        );
+
+        return ResponseEntity.status(HttpStatus.CONFLICT).body(response);
+    }
 }
