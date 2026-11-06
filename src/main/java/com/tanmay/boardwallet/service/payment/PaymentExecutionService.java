@@ -78,8 +78,14 @@ public class PaymentExecutionService {
             throw new DisabledException("Account is disabled");
         }
 
-        String requestHash =
-                paymentRequestHasher.hash(boardId, user.getId(), request);
+        String requestHash = paymentRequestHasher.hash(
+                PaymentRequestHasher.Operation.PLAYER_PAYMENT_V1,
+                boardId,
+                user.getId(),
+                request.getRecipientWalletId(),
+                request.getAmount(),
+                request.getReason()
+        );
 
         Optional<GameTransaction> existing =
                 gameTransactionRepository
@@ -217,8 +223,14 @@ public class PaymentExecutionService {
             throw new DisabledException("Account is disabled");
         }
 
-        String requestHash =
-                paymentRequestHasher.hash(boardId, user.getId(), request);
+        String requestHash = paymentRequestHasher.hash(
+                PaymentRequestHasher.Operation.PLAYER_PAYMENT_V1,
+                boardId,
+                user.getId(),
+                request.getRecipientWalletId(),
+                request.getAmount(),
+                request.getReason()
+        );
 
         return gameTransactionRepository
                 .findByInitiatedBy_IdAndIdempotencyKey(

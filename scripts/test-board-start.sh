@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Requires a running BoardWallet app, curl, and jq.
 # Covers registration, login, board creation/join/start, player payments,
-# and bank payments. Creates two users and two boards with real test payments.
+# bank payments, and bank payouts. Creates two users and two boards with test payments.
 # Leaves test data in the database for inspection.
 set -euo pipefail
 
@@ -147,6 +147,11 @@ bank_payment_payload() {
         '{amount: $amount, reason: $reason}'
 }
 
+bank_payout_payload() {
+    jq -nc --argjson amount "$1" --arg reason "${2:-REWARD}" \
+        '{amount: $amount, reason: $reason}'
+}
+
 assert_balances() {
     local creator_balance="$1" player_balance="$2"
     request 200 GET "$BOARD_PATH" "$CREATOR_TOKEN"
@@ -167,7 +172,7 @@ assert_same_payment() {
 }
 
 # Launch both requests before waiting; an optional eighth argument selects
-# a different route for the second request (bank vs player spending).
+# a different route for the second request (payment or payout).
 parallel_payments() {
     local path="$1" token_a="$2" payload_a="$3" key_a="$4"
     local token_b="$5" payload_b="$6" key_b="$7"
@@ -280,6 +285,8 @@ request 403 POST "$OTHER_PATH/payments" "$PLAYER_TOKEN" \
     "$(payment_payload "$OTHER_CREATOR_WALLET" 10)" "$(uuidgen)"
 request 403 POST "$OTHER_PATH/payments/bank" "$PLAYER_TOKEN" \
     "$(bank_payment_payload 10)" "$(uuidgen)"
+request 403 POST "$OTHER_PATH/payments/bank/payout" "$PLAYER_TOKEN" \
+    "$(bank_payout_payload 10)" "$(uuidgen)"
 request 404 POST "$PAYMENT_PATH" "$CREATOR_TOKEN" \
     "$(payment_payload "$OTHER_CREATOR_WALLET" 10)" "$(uuidgen)"
 request 200 POST /api/boards/join "$PLAYER_TOKEN" \
@@ -441,7 +448,172 @@ assert_same_payment "$DECIMAL_BANK_PAYMENT"
 FINAL_PLAYER_BALANCE=$(jq -n --argjson balance "$FINAL_PLAYER_BALANCE" '$balance - 1.25')
 assert_balances 0 "$FINAL_PLAYER_BALANCE"
 
-printf '\nAll board-start, player-payment, and bank-payment API checks passed. Board: %s\n' "$BOARD_ID"
+BANK_PAYOUT_PATH="$BANK_PAYMENT_PATH/payout"
+
+echo 'Testing bank-payout authentication, headers, and request validation...'
+PAYOUT_PAYLOAD=$(bank_payout_payload 100)
+request 401 POST "$BANK_PAYOUT_PATH" '' "$PAYOUT_PAYLOAD" "$(uuidgen)"
+request 400 POST "$BANK_PAYOUT_PATH" "$CREATOR_TOKEN" "$PAYOUT_PAYLOAD"
+request 400 POST "$BANK_PAYOUT_PATH" "$CREATOR_TOKEN" "$PAYOUT_PAYLOAD" 'not-a-uuid'
+for amount in 0 -1 1.001 100000000000000000; do
+    request 400 POST "$BANK_PAYOUT_PATH" "$CREATOR_TOKEN" \
+        "$(bank_payout_payload "$amount")" "$(uuidgen)"
+done
+for reason in STARTING_MONEY RENT PENALTY UNKNOWN; do
+    request 400 POST "$BANK_PAYOUT_PATH" "$CREATOR_TOKEN" \
+        "$(bank_payout_payload 10 "$reason")" "$(uuidgen)"
+done
+for payload in '{}' '{"amount":100}' '{"reason":"REWARD"}' \
+    '{"amount":null,"reason":"REWARD"}' '{"amount":100,"reason":null}'; do
+    request 400 POST "$BANK_PAYOUT_PATH" "$CREATOR_TOKEN" "$payload" "$(uuidgen)"
+done
+request 404 POST "/api/boards/$(uuidgen)/payments/bank/payout" "$CREATOR_TOKEN" \
+    "$PAYOUT_PAYLOAD" "$(uuidgen)"
+WAITING_PAYOUT_KEY=$(uuidgen)
+request 409 POST "$OTHER_PATH/payments/bank/payout" "$PLAYER_TOKEN" \
+    "$PAYOUT_PAYLOAD" "$WAITING_PAYOUT_KEY"
+request 200 GET "$OTHER_PATH" "$CREATOR_TOKEN"
+assert_json '.status == "WAITING" and (.players | length) == 2 and all(.players[]; .balance == 0)' \
+    'Rejected payouts must leave the waiting board and balances unchanged'
+assert_balances 0 "$FINAL_PLAYER_BALANCE"
+
+echo 'Testing a bank payout into an empty player wallet and normalized-amount replay...'
+PAYOUT_KEY=$(uuidgen)
+request 200 POST "$BANK_PAYOUT_PATH" "$CREATOR_TOKEN" "$PAYOUT_PAYLOAD" "$PAYOUT_KEY"
+ORIGINAL_PAYOUT="$RESPONSE"
+printf '%s' "$RESPONSE" | jq -e \
+    --arg board "$BOARD_ID" --arg bank "$BANK_WALLET" --arg player "$CREATOR_WALLET" \
+    '.boardId == $board and .fromWalletId == $bank and .toWalletId == $player and
+     .amount == 100 and .reason == "REWARD" and
+     (.transactionId | type == "string" and length > 0) and
+     (.createdAt | type == "string" and length > 0)' >/dev/null || fail 'Incorrect bank-payout response'
+request 200 POST "$BANK_PAYOUT_PATH" "$CREATOR_TOKEN" \
+    '{"amount":100.00,"reason":"REWARD"}' "$PAYOUT_KEY"
+assert_same_payment "$ORIGINAL_PAYOUT"
+request 409 POST "$BANK_PAYOUT_PATH" "$CREATOR_TOKEN" \
+    "$(bank_payout_payload 101)" "$PAYOUT_KEY"
+request 409 POST "$BANK_PAYOUT_PATH" "$CREATOR_TOKEN" \
+    "$(bank_payout_payload 100 PASS_START)" "$PAYOUT_KEY"
+request 409 POST "$OTHER_PATH/payments/bank/payout" "$CREATOR_TOKEN" \
+    "$PAYOUT_PAYLOAD" "$PAYOUT_KEY"
+assert_balances 100 "$FINAL_PLAYER_BALANCE"
+
+echo 'Testing a non-creator can claim for themselves with an independent key scope...'
+request 200 POST "$BANK_PAYOUT_PATH" "$PLAYER_TOKEN" \
+    "$(bank_payout_payload 100 PASS_START)" "$PAYOUT_KEY"
+printf '%s' "$RESPONSE" | jq -e \
+    --arg bank "$BANK_WALLET" --arg player "$PLAYER_WALLET" \
+    --arg original "$(printf '%s' "$ORIGINAL_PAYOUT" | jq -r '.transactionId')" \
+    '.fromWalletId == $bank and .toWalletId == $player and
+     .transactionId != $original and .amount == 100 and .reason == "PASS_START"' \
+    >/dev/null || fail 'A non-creator payout must credit their own wallet'
+FINAL_PLAYER_BALANCE=$(jq -n --argjson balance "$FINAL_PLAYER_BALANCE" '$balance + 100')
+assert_balances 100 "$FINAL_PLAYER_BALANCE"
+
+echo 'Testing identical amounts and reasons cannot hide a change in payment direction...'
+DIRECTION_KEY=$(uuidgen)
+request 200 POST "$BANK_PAYOUT_PATH" "$CREATOR_TOKEN" \
+    "$(bank_payout_payload 10 OTHER)" "$DIRECTION_KEY"
+request 409 POST "$BANK_PAYMENT_PATH" "$CREATOR_TOKEN" \
+    "$(bank_payment_payload 10 OTHER)" "$DIRECTION_KEY"
+request 409 POST "$PAYMENT_PATH" "$CREATOR_TOKEN" \
+    "$(payment_payload "$PLAYER_WALLET" 10 OTHER)" "$DIRECTION_KEY"
+request 409 POST "$BANK_PAYOUT_PATH" "$CREATOR_TOKEN" \
+    "$(bank_payout_payload 25 OTHER)" "$BANK_PAYMENT_KEY"
+request 409 POST "$BANK_PAYOUT_PATH" "$CREATOR_TOKEN" \
+    "$(bank_payout_payload 500 OTHER)" "$PAYMENT_KEY"
+assert_balances 110 "$FINAL_PLAYER_BALANCE"
+
+echo 'Testing concurrent duplicate bank payouts credit only once...'
+PAYOUT_DUPLICATE_KEY=$(uuidgen)
+PAYOUT_PAYLOAD=$(bank_payout_payload 20)
+parallel_payments "$BANK_PAYOUT_PATH" "$CREATOR_TOKEN" "$PAYOUT_PAYLOAD" "$PAYOUT_DUPLICATE_KEY" \
+    "$CREATOR_TOKEN" "$PAYOUT_PAYLOAD" "$PAYOUT_DUPLICATE_KEY"
+[[ "$STATUS_A" == 200 && "$STATUS_B" == 200 ]] ||
+    fail "Duplicate payouts must both return 200; received $STATUS_A and $STATUS_B"
+RESPONSE=$(cat "$WORK_DIR/payment-b.json")
+assert_same_payment "$(cat "$WORK_DIR/payment-a.json")"
+assert_balances 130 "$FINAL_PLAYER_BALANCE"
+
+echo 'Testing concurrent payouts with different keys preserve both credits...'
+parallel_payments "$BANK_PAYOUT_PATH" "$CREATOR_TOKEN" "$(bank_payout_payload 30)" "$(uuidgen)" \
+    "$CREATOR_TOKEN" "$(bank_payout_payload 40)" "$(uuidgen)"
+[[ "$STATUS_A" == 200 && "$STATUS_B" == 200 ]] ||
+    fail "Independent payouts must both succeed; received $STATUS_A and $STATUS_B"
+[[ "$(jq -er '.transactionId' "$WORK_DIR/payment-a.json")" != \
+   "$(jq -er '.transactionId' "$WORK_DIR/payment-b.json")" ]] ||
+    fail 'Independent payouts must create distinct transactions'
+assert_balances 200 "$FINAL_PLAYER_BALANCE"
+
+echo 'Testing concurrent reuse of one payout key with different amounts...'
+CONFLICTING_PAYOUT_KEY=$(uuidgen)
+parallel_payments "$BANK_PAYOUT_PATH" "$CREATOR_TOKEN" "$(bank_payout_payload 10)" "$CONFLICTING_PAYOUT_KEY" \
+    "$CREATOR_TOKEN" "$(bank_payout_payload 11)" "$CONFLICTING_PAYOUT_KEY"
+if [[ "$STATUS_A" == 200 && "$STATUS_B" == 409 ]]; then
+    CREATOR_BALANCE=210
+    PAYOUT_CONFLICT_WINNER=$(cat "$WORK_DIR/payment-a.json")
+    WINNING_PAYOUT_PAYLOAD=$(bank_payout_payload 10)
+elif [[ "$STATUS_A" == 409 && "$STATUS_B" == 200 ]]; then
+    CREATOR_BALANCE=211
+    PAYOUT_CONFLICT_WINNER=$(cat "$WORK_DIR/payment-b.json")
+    WINNING_PAYOUT_PAYLOAD=$(bank_payout_payload 11)
+else
+    fail "Conflicting payouts must return one 200 and one 409; received $STATUS_A and $STATUS_B"
+fi
+request 200 POST "$BANK_PAYOUT_PATH" "$CREATOR_TOKEN" "$WINNING_PAYOUT_PAYLOAD" "$CONFLICTING_PAYOUT_KEY"
+assert_same_payment "$PAYOUT_CONFLICT_WINNER"
+assert_balances "$CREATOR_BALANCE" "$FINAL_PLAYER_BALANCE"
+
+echo 'Testing simultaneous payout and player spending preserve both balance changes...'
+parallel_payments "$BANK_PAYOUT_PATH" "$CREATOR_TOKEN" "$(bank_payout_payload 50)" "$(uuidgen)" \
+    "$CREATOR_TOKEN" "$(payment_payload "$PLAYER_WALLET" 20)" "$(uuidgen)" "$PAYMENT_PATH"
+[[ "$STATUS_A" == 200 && "$STATUS_B" == 200 ]] ||
+    fail "Payout and player payment must succeed; received $STATUS_A and $STATUS_B"
+CREATOR_BALANCE=$((CREATOR_BALANCE + 30))
+FINAL_PLAYER_BALANCE=$(jq -n --argjson balance "$FINAL_PLAYER_BALANCE" '$balance + 20')
+assert_balances "$CREATOR_BALANCE" "$FINAL_PLAYER_BALANCE"
+
+echo 'Testing simultaneous payout and bank spending preserve both balance changes...'
+parallel_payments "$BANK_PAYOUT_PATH" "$CREATOR_TOKEN" "$(bank_payout_payload 50)" "$(uuidgen)" \
+    "$CREATOR_TOKEN" "$(bank_payment_payload 20)" "$(uuidgen)" "$BANK_PAYMENT_PATH"
+[[ "$STATUS_A" == 200 && "$STATUS_B" == 200 ]] ||
+    fail "Payout and bank payment must succeed; received $STATUS_A and $STATUS_B"
+CREATOR_BALANCE=$((CREATOR_BALANCE + 30))
+assert_balances "$CREATOR_BALANCE" "$FINAL_PLAYER_BALANCE"
+
+echo 'Testing decimal payouts and replay after subsequent balance changes...'
+DECIMAL_PAYOUT_KEY=$(uuidgen)
+request 200 POST "$BANK_PAYOUT_PATH" "$CREATOR_TOKEN" \
+    "$(bank_payout_payload 1.25)" "$DECIMAL_PAYOUT_KEY"
+DECIMAL_PAYOUT="$RESPONSE"
+assert_json '.amount == 1.25' 'Payouts must preserve decimal amounts'
+request 200 POST "$BANK_PAYOUT_PATH" "$CREATOR_TOKEN" \
+    "$(bank_payout_payload 1.25)" "$DECIMAL_PAYOUT_KEY"
+assert_same_payment "$DECIMAL_PAYOUT"
+request 200 POST "$BANK_PAYOUT_PATH" "$CREATOR_TOKEN" \
+    "$(bank_payout_payload 100)" "$PAYOUT_KEY"
+assert_same_payment "$ORIGINAL_PAYOUT"
+CREATOR_BALANCE=$(jq -n --argjson balance "$CREATOR_BALANCE" '$balance + 1.25')
+assert_balances "$CREATOR_BALANCE" "$FINAL_PLAYER_BALANCE"
+
+echo 'Testing a payout rejected while WAITING can succeed with the same key after start...'
+request 200 POST "$OTHER_PATH/start" "$CREATOR_TOKEN"
+request 200 POST "$OTHER_PATH/payments/bank/payout" "$PLAYER_TOKEN" \
+    "$(bank_payout_payload 100)" "$WAITING_PAYOUT_KEY"
+WAITING_RETRIED_PAYOUT="$RESPONSE"
+assert_json '.amount == 100 and .reason == "REWARD"' 'Retry after board start must succeed'
+request 200 POST "$OTHER_PATH/payments/bank/payout" "$PLAYER_TOKEN" \
+    "$(bank_payout_payload 100)" "$WAITING_PAYOUT_KEY"
+assert_same_payment "$WAITING_RETRIED_PAYOUT"
+request 200 GET "$OTHER_PATH" "$CREATOR_TOKEN"
+printf '%s' "$RESPONSE" | jq -e --arg creator "$CREATOR" --arg player "$PLAYER" \
+    '.status == "ACTIVE" and (.players | length) == 2 and
+     ([.players[] | select(.username == $creator) | .balance] == [1500]) and
+     ([.players[] | select(.username == $player) | .balance] == [1600])' \
+    >/dev/null || fail 'Retry after start must credit the non-creator exactly once'
+assert_balances "$CREATOR_BALANCE" "$FINAL_PLAYER_BALANCE"
+
+printf '\nAll board-start, player-payment, bank-payment, and bank-payout API checks passed. Board: %s\n' "$BOARD_ID"
 printf '%s\n' "$RESPONSE" | jq .
-echo "Additional waiting board: $OTHER_BOARD_ID"
+echo "Additional board (started during payout checks): $OTHER_BOARD_ID"
 echo 'This checks API responses and balances; database history and forced mid-payment rollback need separate checks.'

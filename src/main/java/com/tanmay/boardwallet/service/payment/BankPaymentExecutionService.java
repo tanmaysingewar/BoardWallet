@@ -68,10 +68,13 @@ public class BankPaymentExecutionService {
 
         User user = findEnabledUser(username);
 
-        String requestHash = paymentRequestHasher.hashBankPayment(
+        String requestHash = paymentRequestHasher.hash(
+                PaymentRequestHasher.Operation.BANK_PAYMENT_V1,
                 boardId,
                 user.getId(),
-                request
+                null,
+                request.getAmount(),
+                request.getReason()
         );
 
         Optional<GameTransaction> existing = gameTransactionRepository
@@ -178,10 +181,13 @@ public class BankPaymentExecutionService {
 
         User user = findEnabledUser(username);
 
-        String requestHash = paymentRequestHasher.hashBankPayment(
+        String requestHash = paymentRequestHasher.hash(
+                PaymentRequestHasher.Operation.BANK_PAYMENT_V1,
                 boardId,
                 user.getId(),
-                request
+                null,
+                request.getAmount(),
+                request.getReason()
         );
 
         return gameTransactionRepository

@@ -1,10 +1,8 @@
 package com.tanmay.boardwallet.controller;
 
-import com.tanmay.boardwallet.dto.payment.BankPaymentRequestDTO;
-import com.tanmay.boardwallet.dto.payment.BankPaymentResponseDTO;
-import com.tanmay.boardwallet.dto.payment.PlayerPaymentRequestDTO;
-import com.tanmay.boardwallet.dto.payment.PlayerPaymentResponseDTO;
+import com.tanmay.boardwallet.dto.payment.*;
 import com.tanmay.boardwallet.service.payment.BankPaymentService;
+import com.tanmay.boardwallet.service.payment.BankPayoutService;
 import com.tanmay.boardwallet.service.payment.PaymentService;
 import jakarta.validation.Valid;
 import org.springframework.http.ResponseEntity;
@@ -19,10 +17,13 @@ public class PaymentController {
 
     private final PaymentService paymentService;
     private final BankPaymentService bankPaymentService;
+    private final BankPayoutService bankPayoutService;
 
-    public PaymentController(PaymentService paymentService, BankPaymentService bankPaymentService) {
+
+    public PaymentController(PaymentService paymentService, BankPaymentService bankPaymentService,  BankPayoutService bankPayoutService) {
         this.paymentService = paymentService;
         this.bankPaymentService = bankPaymentService;
+        this.bankPayoutService = bankPayoutService;
     }
 
     @PostMapping
@@ -50,6 +51,23 @@ public class PaymentController {
             Authentication authentication) {
 
         BankPaymentResponseDTO response = bankPaymentService.pay(
+                boardId,
+                idempotencyKey,
+                request,
+                authentication.getName()
+        );
+
+        return ResponseEntity.ok(response);
+    }
+
+    @PostMapping("/bank/payout")
+    public ResponseEntity<BankPayoutResponseDTO> claimBankPayout(
+            @PathVariable("boardId") UUID boardId,
+            @RequestHeader("Idempotency-Key") UUID idempotencyKey,
+            @Valid @RequestBody BankPayoutRequestDTO request,
+            Authentication authentication) {
+
+        BankPayoutResponseDTO response = bankPayoutService.payout(
                 boardId,
                 idempotencyKey,
                 request,
