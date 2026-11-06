@@ -54,4 +54,15 @@ public interface WalletRepository extends JpaRepository<Wallet, UUID> {
             @Param("userId") UUID userId,
             @Param("walletType") WalletType walletType
     );
+
+    @Query("""
+        SELECT w.id
+        FROM Wallet w
+        WHERE w.board.id = :boardId
+          AND w.walletType = :walletType
+        """)
+    Optional<UUID> findWalletIdByBoardAndType(
+            @Param("boardId") UUID boardId,
+            @Param("walletType") WalletType walletType
+    );
 }

@@ -1,7 +1,10 @@
 package com.tanmay.boardwallet.controller;
 
+import com.tanmay.boardwallet.dto.payment.BankPaymentRequestDTO;
+import com.tanmay.boardwallet.dto.payment.BankPaymentResponseDTO;
 import com.tanmay.boardwallet.dto.payment.PlayerPaymentRequestDTO;
 import com.tanmay.boardwallet.dto.payment.PlayerPaymentResponseDTO;
+import com.tanmay.boardwallet.service.payment.BankPaymentService;
 import com.tanmay.boardwallet.service.payment.PaymentService;
 import jakarta.validation.Valid;
 import org.springframework.http.ResponseEntity;
@@ -15,9 +18,11 @@ import java.util.UUID;
 public class PaymentController {
 
     private final PaymentService paymentService;
+    private final BankPaymentService bankPaymentService;
 
-    public PaymentController(PaymentService paymentService) {
+    public PaymentController(PaymentService paymentService, BankPaymentService bankPaymentService) {
         this.paymentService = paymentService;
+        this.bankPaymentService = bankPaymentService;
     }
 
     @PostMapping
@@ -28,6 +33,23 @@ public class PaymentController {
             Authentication authentication) {
 
         PlayerPaymentResponseDTO response = paymentService.pay(
+                boardId,
+                idempotencyKey,
+                request,
+                authentication.getName()
+        );
+
+        return ResponseEntity.ok(response);
+    }
+
+    @PostMapping("/bank")
+    public ResponseEntity<BankPaymentResponseDTO> payBank(
+            @PathVariable("boardId") UUID boardId,
+            @RequestHeader("Idempotency-Key") UUID idempotencyKey,
+            @Valid @RequestBody BankPaymentRequestDTO request,
+            Authentication authentication) {
+
+        BankPaymentResponseDTO response = bankPaymentService.pay(
                 boardId,
                 idempotencyKey,
                 request,

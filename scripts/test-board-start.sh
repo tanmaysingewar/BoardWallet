@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Requires a running BoardWallet app, curl, and jq.
-# Creates two users and two boards, including real test payments.
+# Covers registration, login, board creation/join/start, player payments,
+# and bank payments. Creates two users and two boards with real test payments.
 # Leaves test data in the database for inspection.
 set -euo pipefail
 
@@ -141,6 +142,11 @@ payment_payload() {
         '{recipientWalletId: $recipient, amount: $amount, reason: $reason}'
 }
 
+bank_payment_payload() {
+    jq -nc --argjson amount "$1" --arg reason "${2:-PENALTY}" \
+        '{amount: $amount, reason: $reason}'
+}
+
 assert_balances() {
     local creator_balance="$1" player_balance="$2"
     request 200 GET "$BOARD_PATH" "$CREATOR_TOKEN"
@@ -160,14 +166,16 @@ assert_same_payment() {
         '. == $original' >/dev/null || fail 'Retry must return the original payment response'
 }
 
-# Launch both requests before waiting; responses remain in separate files.
+# Launch both requests before waiting; an optional eighth argument selects
+# a different route for the second request (bank vs player spending).
 parallel_payments() {
     local path="$1" token_a="$2" payload_a="$3" key_a="$4"
     local token_b="$5" payload_b="$6" key_b="$7"
+    local path_b="${8:-$path}"
     http POST "$path" "$token_a" "$payload_a" "$WORK_DIR/payment-a.json" "$key_a" \
         > "$WORK_DIR/payment-status-a" &
     local pid_a=$!
-    http POST "$path" "$token_b" "$payload_b" "$WORK_DIR/payment-b.json" "$key_b" \
+    http POST "$path_b" "$token_b" "$payload_b" "$WORK_DIR/payment-b.json" "$key_b" \
         > "$WORK_DIR/payment-status-b" &
     local pid_b=$!
     local wait_failed=0
@@ -270,6 +278,8 @@ request 200 GET "$OTHER_PATH" "$CREATOR_TOKEN"
 OTHER_CREATOR_WALLET=$(printf '%s' "$RESPONSE" | jq -er '.players[0].walletId')
 request 403 POST "$OTHER_PATH/payments" "$PLAYER_TOKEN" \
     "$(payment_payload "$OTHER_CREATOR_WALLET" 10)" "$(uuidgen)"
+request 403 POST "$OTHER_PATH/payments/bank" "$PLAYER_TOKEN" \
+    "$(bank_payment_payload 10)" "$(uuidgen)"
 request 404 POST "$PAYMENT_PATH" "$CREATOR_TOKEN" \
     "$(payment_payload "$OTHER_CREATOR_WALLET" 10)" "$(uuidgen)"
 request 200 POST /api/boards/join "$PLAYER_TOKEN" \
@@ -282,7 +292,156 @@ assert_json '.status == "WAITING" and (.players | length) == 2 and all(.players[
     'Rejected payments must leave the waiting board and balances unchanged'
 assert_balances 100 2900
 
-printf '\nAll board-start and payment API checks passed. Board: %s\n' "$BOARD_ID"
+BANK_PAYMENT_PATH="$PAYMENT_PATH/bank"
+
+echo 'Testing bank-payment authentication, headers, and request validation...'
+BANK_PAYLOAD=$(bank_payment_payload 25)
+request 401 POST "$BANK_PAYMENT_PATH" '' "$BANK_PAYLOAD" "$(uuidgen)"
+request 400 POST "$BANK_PAYMENT_PATH" "$CREATOR_TOKEN" "$BANK_PAYLOAD"
+request 400 POST "$BANK_PAYMENT_PATH" "$CREATOR_TOKEN" "$BANK_PAYLOAD" 'not-a-uuid'
+for amount in 0 -1 1.001 100000000000000000; do
+    request 400 POST "$BANK_PAYMENT_PATH" "$CREATOR_TOKEN" \
+        "$(bank_payment_payload "$amount")" "$(uuidgen)"
+done
+for reason in STARTING_MONEY RENT REWARD PASS_START UNKNOWN; do
+    request 400 POST "$BANK_PAYMENT_PATH" "$CREATOR_TOKEN" \
+        "$(bank_payment_payload 10 "$reason")" "$(uuidgen)"
+done
+for payload in '{}' '{"amount":25}' '{"reason":"PENALTY"}' \
+    '{"amount":null,"reason":"PENALTY"}' '{"amount":25,"reason":null}'; do
+    request 400 POST "$BANK_PAYMENT_PATH" "$CREATOR_TOKEN" "$payload" "$(uuidgen)"
+done
+request 404 POST "/api/boards/$(uuidgen)/payments/bank" "$CREATOR_TOKEN" \
+    "$BANK_PAYLOAD" "$(uuidgen)"
+request 409 POST "$OTHER_PATH/payments/bank" "$CREATOR_TOKEN" \
+    "$BANK_PAYLOAD" "$(uuidgen)"
+request 200 GET "$OTHER_PATH" "$CREATOR_TOKEN"
+assert_json '.status == "WAITING" and all(.players[]; .balance == 0)' \
+    'Rejected bank payments must leave the waiting board unchanged'
+assert_balances 100 2900
+
+echo 'Testing successful bank payment and normalized-amount replay...'
+BANK_PAYMENT_KEY=$(uuidgen)
+request 200 POST "$BANK_PAYMENT_PATH" "$CREATOR_TOKEN" "$BANK_PAYLOAD" "$BANK_PAYMENT_KEY"
+ORIGINAL_BANK_PAYMENT="$RESPONSE"
+BANK_WALLET=$(printf '%s' "$RESPONSE" | jq -er '.toWalletId | select(type == "string" and length > 0)')
+printf '%s' "$RESPONSE" | jq -e \
+    --arg board "$BOARD_ID" --arg sender "$CREATOR_WALLET" --arg player "$PLAYER_WALLET" \
+    '.boardId == $board and .fromWalletId == $sender and
+     .toWalletId != $sender and .toWalletId != $player and
+     .amount == 25 and .reason == "PENALTY" and
+     (.transactionId | type == "string" and length > 0) and
+     (.createdAt | type == "string" and length > 0)' >/dev/null || fail 'Incorrect bank-payment response'
+assert_balances 75 2900
+request 200 POST "$BANK_PAYMENT_PATH" "$CREATOR_TOKEN" \
+    '{"amount":25.00,"reason":"PENALTY"}' "$BANK_PAYMENT_KEY"
+assert_same_payment "$ORIGINAL_BANK_PAYMENT"
+request 409 POST "$BANK_PAYMENT_PATH" "$CREATOR_TOKEN" \
+    "$(bank_payment_payload 26)" "$BANK_PAYMENT_KEY"
+request 409 POST "$BANK_PAYMENT_PATH" "$CREATOR_TOKEN" \
+    "$(bank_payment_payload 25 OTHER)" "$BANK_PAYMENT_KEY"
+request 409 POST "$OTHER_PATH/payments/bank" "$CREATOR_TOKEN" \
+    "$BANK_PAYLOAD" "$BANK_PAYMENT_KEY"
+
+echo 'Testing that idempotency keys cannot be reused across payment routes...'
+request 409 POST "$BANK_PAYMENT_PATH" "$CREATOR_TOKEN" "$BANK_PAYLOAD" "$PAYMENT_KEY"
+request 409 POST "$PAYMENT_PATH" "$CREATOR_TOKEN" \
+    "$(payment_payload "$PLAYER_WALLET" 25 OTHER)" "$BANK_PAYMENT_KEY"
+assert_balances 75 2900
+
+echo 'Testing that another player spends only their own funds with an independent key scope...'
+request 200 POST "$BANK_PAYMENT_PATH" "$PLAYER_TOKEN" "$BANK_PAYLOAD" "$BANK_PAYMENT_KEY"
+printf '%s' "$RESPONSE" | jq -e \
+    --arg sender "$PLAYER_WALLET" --arg bank "$BANK_WALLET" \
+    --arg transaction "$(printf '%s' "$ORIGINAL_BANK_PAYMENT" | jq -r '.transactionId')" \
+    '.fromWalletId == $sender and .toWalletId == $bank and
+     .transactionId != $transaction and .amount == 25 and .reason == "PENALTY"' \
+    >/dev/null || fail 'Player bank payment must use their own wallet and a distinct transaction'
+assert_balances 75 2875
+
+echo 'Testing concurrent duplicate bank payments...'
+BANK_DUPLICATE_KEY=$(uuidgen)
+BANK_PAYLOAD=$(bank_payment_payload 10)
+parallel_payments "$BANK_PAYMENT_PATH" "$CREATOR_TOKEN" "$BANK_PAYLOAD" "$BANK_DUPLICATE_KEY" \
+    "$CREATOR_TOKEN" "$BANK_PAYLOAD" "$BANK_DUPLICATE_KEY"
+[[ "$STATUS_A" == 200 && "$STATUS_B" == 200 ]] ||
+    fail "Duplicate bank payments must both return 200; received $STATUS_A and $STATUS_B"
+RESPONSE=$(cat "$WORK_DIR/payment-b.json")
+assert_same_payment "$(cat "$WORK_DIR/payment-a.json")"
+assert_balances 65 2875
+
+echo 'Testing concurrent bank payments cannot overspend...'
+BANK_PAYLOAD=$(bank_payment_payload 50)
+parallel_payments "$BANK_PAYMENT_PATH" "$CREATOR_TOKEN" "$BANK_PAYLOAD" "$(uuidgen)" \
+    "$CREATOR_TOKEN" "$BANK_PAYLOAD" "$(uuidgen)"
+if ! { [[ "$STATUS_A" == 200 && "$STATUS_B" == 400 ]] ||
+       [[ "$STATUS_A" == 400 && "$STATUS_B" == 200 ]]; }; then
+    fail "Bank overspending must return one 200 and one 400; received $STATUS_A and $STATUS_B"
+fi
+assert_balances 15 2875
+
+echo 'Testing a declined bank payment can succeed with the same key after receiving funds...'
+FAILED_BANK_KEY=$(uuidgen)
+BANK_PAYLOAD=$(bank_payment_payload 20 OTHER)
+request 400 POST "$BANK_PAYMENT_PATH" "$CREATOR_TOKEN" "$BANK_PAYLOAD" "$FAILED_BANK_KEY"
+assert_balances 15 2875
+request 200 POST "$PAYMENT_PATH" "$PLAYER_TOKEN" \
+    "$(payment_payload "$CREATOR_WALLET" 10)" "$(uuidgen)"
+assert_balances 25 2865
+request 200 POST "$BANK_PAYMENT_PATH" "$CREATOR_TOKEN" "$BANK_PAYLOAD" "$FAILED_BANK_KEY"
+RETRIED_BANK_PAYMENT="$RESPONSE"
+assert_json '.amount == 20 and .reason == "OTHER"' 'OTHER must be accepted for bank payments'
+request 200 POST "$BANK_PAYMENT_PATH" "$CREATOR_TOKEN" "$BANK_PAYLOAD" "$FAILED_BANK_KEY"
+assert_same_payment "$RETRIED_BANK_PAYMENT"
+assert_balances 5 2865
+
+echo 'Testing concurrent bank and player payments share the same spending protection...'
+parallel_payments "$BANK_PAYMENT_PATH" "$CREATOR_TOKEN" "$(bank_payment_payload 4)" "$(uuidgen)" \
+    "$CREATOR_TOKEN" "$(payment_payload "$PLAYER_WALLET" 4)" "$(uuidgen)" "$PAYMENT_PATH"
+if [[ "$STATUS_A" == 200 && "$STATUS_B" == 400 ]]; then
+    FINAL_PLAYER_BALANCE=2865
+elif [[ "$STATUS_A" == 400 && "$STATUS_B" == 200 ]]; then
+    FINAL_PLAYER_BALANCE=2869
+else
+    fail "Mixed-route overspending must return one 200 and one 400; received $STATUS_A and $STATUS_B"
+fi
+assert_balances 1 "$FINAL_PLAYER_BALANCE"
+
+echo 'Testing concurrent reuse of one bank-payment key with different amounts...'
+CONFLICTING_BANK_KEY=$(uuidgen)
+parallel_payments "$BANK_PAYMENT_PATH" "$PLAYER_TOKEN" "$(bank_payment_payload 10)" "$CONFLICTING_BANK_KEY" \
+    "$PLAYER_TOKEN" "$(bank_payment_payload 11)" "$CONFLICTING_BANK_KEY"
+if [[ "$STATUS_A" == 200 && "$STATUS_B" == 409 ]]; then
+    FINAL_PLAYER_BALANCE=$((FINAL_PLAYER_BALANCE - 10))
+    BANK_CONFLICT_WINNER=$(cat "$WORK_DIR/payment-a.json")
+    WINNING_BANK_PAYLOAD=$(bank_payment_payload 10)
+elif [[ "$STATUS_A" == 409 && "$STATUS_B" == 200 ]]; then
+    FINAL_PLAYER_BALANCE=$((FINAL_PLAYER_BALANCE - 11))
+    BANK_CONFLICT_WINNER=$(cat "$WORK_DIR/payment-b.json")
+    WINNING_BANK_PAYLOAD=$(bank_payment_payload 11)
+else
+    fail "Conflicting bank requests must return one 200 and one 409; received $STATUS_A and $STATUS_B"
+fi
+request 200 POST "$BANK_PAYMENT_PATH" "$PLAYER_TOKEN" "$WINNING_BANK_PAYLOAD" "$CONFLICTING_BANK_KEY"
+assert_same_payment "$BANK_CONFLICT_WINNER"
+assert_balances 1 "$FINAL_PLAYER_BALANCE"
+
+echo 'Testing exact-balance spending, decimal amounts, and replay after funds are exhausted...'
+request 200 POST "$BANK_PAYMENT_PATH" "$CREATOR_TOKEN" "$(bank_payment_payload 1)" "$(uuidgen)"
+request 400 POST "$BANK_PAYMENT_PATH" "$CREATOR_TOKEN" "$(bank_payment_payload 0.01)" "$(uuidgen)"
+request 200 POST "$BANK_PAYMENT_PATH" "$CREATOR_TOKEN" "$(bank_payment_payload 25)" "$BANK_PAYMENT_KEY"
+assert_same_payment "$ORIGINAL_BANK_PAYMENT"
+assert_balances 0 "$FINAL_PLAYER_BALANCE"
+DECIMAL_BANK_KEY=$(uuidgen)
+request 200 POST "$BANK_PAYMENT_PATH" "$PLAYER_TOKEN" "$(bank_payment_payload 1.25)" "$DECIMAL_BANK_KEY"
+DECIMAL_BANK_PAYMENT="$RESPONSE"
+assert_json '.amount == 1.25' 'Bank payments must preserve decimal amounts'
+request 200 POST "$BANK_PAYMENT_PATH" "$PLAYER_TOKEN" "$(bank_payment_payload 1.25)" "$DECIMAL_BANK_KEY"
+assert_same_payment "$DECIMAL_BANK_PAYMENT"
+FINAL_PLAYER_BALANCE=$(jq -n --argjson balance "$FINAL_PLAYER_BALANCE" '$balance - 1.25')
+assert_balances 0 "$FINAL_PLAYER_BALANCE"
+
+printf '\nAll board-start, player-payment, and bank-payment API checks passed. Board: %s\n' "$BOARD_ID"
 printf '%s\n' "$RESPONSE" | jq .
 echo "Additional waiting board: $OTHER_BOARD_ID"
 echo 'This checks API responses and balances; database history and forced mid-payment rollback need separate checks.'
