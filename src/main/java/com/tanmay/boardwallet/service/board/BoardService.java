@@ -20,6 +20,7 @@ public class BoardService {
     private final BoardJoiningService boardJoiningService;
     private final BoardDetailsService boardDetailsService;
     private final BoardStartingService boardStartingService;
+    private final BoardFinishingService boardFinishingService;
 
     private static final String JOIN_CODE_CHARACTERS =
             "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
@@ -35,13 +36,15 @@ public class BoardService {
             BoardCreationService boardCreationService,
             BoardJoiningService boardJoiningService,
             BoardDetailsService boardDetailsService,
-            BoardStartingService boardStartingService) {
+            BoardStartingService boardStartingService,
+            BoardFinishingService boardFinishingService) {
 
         this.boardRepository = boardRepository;
         this.boardCreationService = boardCreationService;
         this.boardJoiningService = boardJoiningService;
         this.boardDetailsService = boardDetailsService;
         this.boardStartingService = boardStartingService;
+        this.boardFinishingService = boardFinishingService;
     }
 
     @Transactional(propagation = Propagation.NOT_SUPPORTED)
@@ -110,6 +113,13 @@ public class BoardService {
             String username) {
 
         return boardStartingService.startBoard(boardId, username);
+    }
+
+    public BoardDetailsResponseDTO finishBoard(
+            UUID boardId,
+            String username) {
+
+        return boardFinishingService.finishBoard(boardId, username);
     }
 
     private String generateJoinCode() {

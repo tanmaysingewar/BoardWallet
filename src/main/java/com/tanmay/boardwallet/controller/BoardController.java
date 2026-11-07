@@ -68,4 +68,18 @@ public class BoardController {
 
         return ResponseEntity.ok(response);
     }
+
+    @PostMapping("/{boardId}/finish")
+    public ResponseEntity<BoardDetailsResponseDTO> finishBoard(
+            @PathVariable("boardId") UUID boardId,
+            Authentication authentication) {
+
+        BoardDetailsResponseDTO response =
+                boardService.finishBoard(
+                        boardId,
+                        authentication.getName()
+                );
+
+        return ResponseEntity.ok(response);
+    }
 }

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Requires a running BoardWallet app, curl, and jq.
 # Covers registration, login, board creation/join/start, player payments,
-# bank payments, and bank payouts. Creates two users and two boards with test payments.
+# bank payments, bank payouts, and board finishing (including concurrent requests).
+# Creates two users and two boards with test payments; finishes both boards.
 # Leaves test data in the database for inspection.
 set -euo pipefail
 
@@ -153,15 +154,16 @@ bank_payout_payload() {
 }
 
 assert_balances() {
-    local creator_balance="$1" player_balance="$2"
+    local creator_balance="$1" player_balance="$2" board_status="${3:-ACTIVE}"
     request 200 GET "$BOARD_PATH" "$CREATOR_TOKEN"
     printf '%s' "$RESPONSE" | jq -e \
         --arg creator "$CREATOR" --arg player "$PLAYER" \
+        --arg status "$board_status" \
         --argjson creatorBalance "$creator_balance" --argjson playerBalance "$player_balance" \
-        '.status == "ACTIVE" and (.players | length) == 2 and
+        '.status == $status and (.players | length) == 2 and
          ([.players[] | select(.username == $creator) | .balance] == [$creatorBalance]) and
          ([.players[] | select(.username == $player) | .balance] == [$playerBalance])' \
-        >/dev/null || fail "Expected balances: creator=$creator_balance, player=$player_balance"
+        >/dev/null || fail "Expected $board_status board with balances: creator=$creator_balance, player=$player_balance"
     echo "PASS: balances creator=$creator_balance, player=$player_balance"
 }
 
@@ -279,7 +281,13 @@ request 200 POST /api/boards "$CREATOR_TOKEN" \
 OTHER_BOARD_ID=$(printf '%s' "$RESPONSE" | jq -er '.id')
 OTHER_JOIN_CODE=$(printf '%s' "$RESPONSE" | jq -er '.joinCode')
 OTHER_PATH="/api/boards/$OTHER_BOARD_ID"
+request 401 POST "$OTHER_PATH/finish"
+request 403 POST "$OTHER_PATH/finish" "$PLAYER_TOKEN"
+request 409 POST "$OTHER_PATH/finish" "$CREATOR_TOKEN"
+request 404 POST "/api/boards/$(uuidgen)/finish" "$CREATOR_TOKEN"
 request 200 GET "$OTHER_PATH" "$CREATOR_TOKEN"
+assert_json '.status == "WAITING" and (.players | length) == 1 and .players[0].balance == 0' \
+    'Rejected finish requests must leave the waiting board unchanged'
 OTHER_CREATOR_WALLET=$(printf '%s' "$RESPONSE" | jq -er '.players[0].walletId')
 request 403 POST "$OTHER_PATH/payments" "$PLAYER_TOKEN" \
     "$(payment_payload "$OTHER_CREATOR_WALLET" 10)" "$(uuidgen)"
@@ -613,7 +621,87 @@ printf '%s' "$RESPONSE" | jq -e --arg creator "$CREATOR" --arg player "$PLAYER" 
     >/dev/null || fail 'Retry after start must credit the non-creator exactly once'
 assert_balances "$CREATOR_BALANCE" "$FINAL_PLAYER_BALANCE"
 
-printf '\nAll board-start, player-payment, bank-payment, and bank-payout API checks passed. Board: %s\n' "$BOARD_ID"
+echo 'Testing finish permissions on an active board...'
+request 401 POST "$BOARD_PATH/finish"
+request 403 POST "$BOARD_PATH/finish" "$PLAYER_TOKEN"
+assert_balances "$CREATOR_BALANCE" "$FINAL_PLAYER_BALANCE"
+
+echo 'Sending two simultaneous creator finish requests...'
+parallel_payments "$BOARD_PATH/finish" "$CREATOR_TOKEN" '' '' \
+    "$CREATOR_TOKEN" '' ''
+if ! { [[ "$STATUS_A" == 200 && "$STATUS_B" == 409 ]] ||
+       [[ "$STATUS_A" == 409 && "$STATUS_B" == 200 ]]; }; then
+    fail "Concurrent finishes must return one 200 and one 409; received $STATUS_A and $STATUS_B"
+fi
+if [[ "$STATUS_A" == 200 ]]; then
+    RESPONSE=$(cat "$WORK_DIR/payment-a.json")
+else
+    RESPONSE=$(cat "$WORK_DIR/payment-b.json")
+fi
+assert_json '.status == "FINISHED"' 'Successful finish must return FINISHED board details'
+assert_balances "$CREATOR_BALANCE" "$FINAL_PLAYER_BALANCE" FINISHED
+request 409 POST "$BOARD_PATH/finish" "$CREATOR_TOKEN"
+request 409 POST "$BOARD_PATH/start" "$CREATOR_TOKEN"
+request 200 POST /api/boards/join "$PLAYER_TOKEN" "$JOIN_PAYLOAD"
+assert_json '.status == "FINISHED"' 'Existing membership replay must report the finished status'
+request 200 GET "$BOARD_PATH" "$PLAYER_TOKEN"
+assert_json '.status == "FINISHED"' 'Members must still be able to read a finished board'
+
+echo 'Testing finished boards reject new payments and payouts...'
+request 409 POST "$PAYMENT_PATH" "$CREATOR_TOKEN" \
+    "$(payment_payload "$PLAYER_WALLET" 1)" "$(uuidgen)"
+request 409 POST "$BANK_PAYMENT_PATH" "$CREATOR_TOKEN" \
+    "$(bank_payment_payload 1)" "$(uuidgen)"
+request 409 POST "$BANK_PAYOUT_PATH" "$CREATOR_TOKEN" \
+    "$(bank_payout_payload 1)" "$(uuidgen)"
+
+echo 'Testing completed payments still replay after finishing without moving money...'
+request 200 POST "$PAYMENT_PATH" "$CREATOR_TOKEN" \
+    "$(payment_payload "$PLAYER_WALLET" 500)" "$PAYMENT_KEY"
+assert_same_payment "$ORIGINAL_PAYMENT"
+request 200 POST "$BANK_PAYMENT_PATH" "$CREATOR_TOKEN" \
+    "$(bank_payment_payload 25)" "$BANK_PAYMENT_KEY"
+assert_same_payment "$ORIGINAL_BANK_PAYMENT"
+request 200 POST "$BANK_PAYOUT_PATH" "$CREATOR_TOKEN" \
+    "$(bank_payout_payload 100)" "$PAYOUT_KEY"
+assert_same_payment "$ORIGINAL_PAYOUT"
+assert_balances "$CREATOR_BALANCE" "$FINAL_PLAYER_BALANCE" FINISHED
+
+echo 'Testing finish racing with a new player payment on the other board...'
+FINISH_RACE_KEY=$(uuidgen)
+FINISH_RACE_PAYLOAD=$(payment_payload "$OTHER_PLAYER_WALLET" 10)
+parallel_payments "$OTHER_PATH/finish" "$CREATOR_TOKEN" '' '' \
+    "$CREATOR_TOKEN" "$FINISH_RACE_PAYLOAD" "$FINISH_RACE_KEY" "$OTHER_PATH/payments"
+[[ "$STATUS_A" == 200 ]] || fail "Racing finish must succeed; received $STATUS_A"
+RESPONSE=$(cat "$WORK_DIR/payment-a.json")
+assert_json '.status == "FINISHED"' 'Racing finish must return FINISHED'
+if [[ "$STATUS_B" == 200 ]]; then
+    OTHER_CREATOR_BALANCE=1490
+    OTHER_PLAYER_BALANCE=1610
+    FINISH_RACE_PAYMENT=$(cat "$WORK_DIR/payment-b.json")
+    request 200 POST "$OTHER_PATH/payments" "$CREATOR_TOKEN" \
+        "$FINISH_RACE_PAYLOAD" "$FINISH_RACE_KEY"
+    assert_same_payment "$FINISH_RACE_PAYMENT"
+elif [[ "$STATUS_B" == 409 ]]; then
+    OTHER_CREATOR_BALANCE=1500
+    OTHER_PLAYER_BALANCE=1600
+    request 409 POST "$OTHER_PATH/payments" "$CREATOR_TOKEN" \
+        "$FINISH_RACE_PAYLOAD" "$FINISH_RACE_KEY"
+else
+    fail "Racing payment must succeed before finish or be rejected; received $STATUS_B"
+fi
+request 200 GET "$OTHER_PATH" "$CREATOR_TOKEN"
+printf '%s' "$RESPONSE" | jq -e \
+    --arg creator "$CREATOR" --arg player "$PLAYER" \
+    --argjson creatorBalance "$OTHER_CREATOR_BALANCE" \
+    --argjson playerBalance "$OTHER_PLAYER_BALANCE" \
+    '.status == "FINISHED" and (.players | length) == 2 and
+     ([.players[] | select(.username == $creator) | .balance] == [$creatorBalance]) and
+     ([.players[] | select(.username == $player) | .balance] == [$playerBalance])' \
+    >/dev/null || fail 'Finish/payment race must preserve exactly the accepted balance changes'
+assert_balances "$CREATOR_BALANCE" "$FINAL_PLAYER_BALANCE" FINISHED
+
+printf '\nAll board-start, player-payment, bank-payment, bank-payout, and board-finish API checks passed. Board: %s\n' "$BOARD_ID"
 printf '%s\n' "$RESPONSE" | jq .
-echo "Additional board (started during payout checks): $OTHER_BOARD_ID"
-echo 'This checks API responses and balances; database history and forced mid-payment rollback need separate checks.'
+echo "Additional board (also finished): $OTHER_BOARD_ID"
+echo 'This checks API responses and balances; database history, finishedAt persistence, and forced mid-payment rollback need separate checks.'
