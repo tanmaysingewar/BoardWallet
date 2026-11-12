@@ -1,5 +1,6 @@
 package com.tanmay.boardwallet.repository;
 
+import com.tanmay.boardwallet.entity.Board;
 import com.tanmay.boardwallet.entity.Wallet;
 import com.tanmay.boardwallet.entity.constant.WalletType;
 import jakarta.persistence.LockModeType;
@@ -63,6 +64,19 @@ public interface WalletRepository extends JpaRepository<Wallet, UUID> {
         """)
     Optional<UUID> findWalletIdByBoardAndType(
             @Param("boardId") UUID boardId,
+            @Param("walletType") WalletType walletType
+    );
+
+    @Query("""
+        SELECT b
+        FROM Wallet w
+        JOIN w.board b
+        WHERE w.user.id = :userId
+          AND w.walletType = :walletType
+        ORDER BY b.createdAt DESC, b.id ASC
+        """)
+    List<Board> findBoardsByUserIdAndWalletType(
+            @Param("userId") UUID userId,
             @Param("walletType") WalletType walletType
     );
 }

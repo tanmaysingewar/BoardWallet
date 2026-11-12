@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Requires a running BoardWallet app, curl, and jq.
-# Covers registration, login, board creation/join/start, player payments,
+# Covers registration, login, board creation/list/join/start, player payments,
 # bank payments, bank payouts, and board finishing (including concurrent requests).
 # Creates two users and two boards with test payments; finishes both boards.
 # Leaves test data in the database for inspection.
@@ -79,6 +79,11 @@ request 200 POST /api/auth/login '' "$(credentials "$CREATOR")"
 CREATOR_TOKEN=$(printf '%s' "$RESPONSE" | jq -er '.accessToken | select(type == "string" and length > 0)')
 request 200 POST /api/auth/login '' "$(credentials "$PLAYER")"
 PLAYER_TOKEN=$(printf '%s' "$RESPONSE" | jq -er '.accessToken | select(type == "string" and length > 0)')
+
+echo 'Testing board-list authentication and empty results...'
+request 401 GET /api/boards
+request 200 GET /api/boards "$PLAYER_TOKEN"
+assert_json '. == []' 'A user with no boards must get an empty array'
 
 request 200 POST /api/boards "$CREATOR_TOKEN" \
     "$(jq -nc --arg name "Start flow $RUN_ID" --argjson amount "$STARTING_AMOUNT" \
@@ -281,6 +286,21 @@ request 200 POST /api/boards "$CREATOR_TOKEN" \
 OTHER_BOARD_ID=$(printf '%s' "$RESPONSE" | jq -er '.id')
 OTHER_JOIN_CODE=$(printf '%s' "$RESPONSE" | jq -er '.joinCode')
 OTHER_PATH="/api/boards/$OTHER_BOARD_ID"
+
+echo 'Testing board summaries, newest-first order, and membership filtering...'
+request 200 GET /api/boards "$CREATOR_TOKEN"
+printf '%s' "$RESPONSE" | jq -e \
+    --arg first "$BOARD_ID" --arg second "$OTHER_BOARD_ID" \
+    --arg firstName "Start flow $RUN_ID" --arg secondName "Payment boundaries $RUN_ID" \
+    'map({boardId, name, status}) == [
+        {boardId: $second, name: $secondName, status: "WAITING"},
+        {boardId: $first, name: $firstName, status: "ACTIVE"}
+    ]' >/dev/null || fail 'Creator must see both board summaries, newest first'
+request 200 GET /api/boards "$PLAYER_TOKEN"
+printf '%s' "$RESPONSE" | jq -e --arg board "$BOARD_ID" \
+    'map(.boardId) == [$board]' >/dev/null ||
+    fail 'Player must see only the board they joined'
+
 request 401 POST "$OTHER_PATH/finish"
 request 403 POST "$OTHER_PATH/finish" "$PLAYER_TOKEN"
 request 409 POST "$OTHER_PATH/finish" "$CREATOR_TOKEN"
@@ -699,9 +719,17 @@ printf '%s' "$RESPONSE" | jq -e \
      ([.players[] | select(.username == $creator) | .balance] == [$creatorBalance]) and
      ([.players[] | select(.username == $player) | .balance] == [$playerBalance])' \
     >/dev/null || fail 'Finish/payment race must preserve exactly the accepted balance changes'
+
+echo 'Testing finished boards remain listed for their members...'
+request 200 GET /api/boards "$PLAYER_TOKEN"
+printf '%s' "$RESPONSE" | jq -e --arg first "$BOARD_ID" --arg second "$OTHER_BOARD_ID" \
+    'map({boardId, status}) == [
+        {boardId: $second, status: "FINISHED"},
+        {boardId: $first, status: "FINISHED"}
+    ]' >/dev/null || fail 'Both joined boards must remain listed with FINISHED status'
 assert_balances "$CREATOR_BALANCE" "$FINAL_PLAYER_BALANCE" FINISHED
 
-printf '\nAll board-start, player-payment, bank-payment, bank-payout, and board-finish API checks passed. Board: %s\n' "$BOARD_ID"
+printf '\nAll board-list, board-start, player-payment, bank-payment, bank-payout, and board-finish API checks passed. Board: %s\n' "$BOARD_ID"
 printf '%s\n' "$RESPONSE" | jq .
 echo "Additional board (also finished): $OTHER_BOARD_ID"
 echo 'This checks API responses and balances; database history, finishedAt persistence, and forced mid-payment rollback need separate checks.'

@@ -10,6 +10,7 @@ import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.security.SecureRandom;
+import java.util.List;
 import java.util.UUID;
 
 @Service
@@ -131,5 +132,9 @@ public class BoardService {
         }
 
         return new String(code);
+    }
+
+    public List<BoardSummaryResponseDTO> listMyBoards(String username) {
+        return boardDetailsService.listMyBoards(username);
     }
 }

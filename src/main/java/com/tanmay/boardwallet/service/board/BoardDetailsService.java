@@ -2,6 +2,7 @@ package com.tanmay.boardwallet.service.board;
 
 import com.tanmay.boardwallet.dto.board.BoardDetailsResponseDTO;
 import com.tanmay.boardwallet.dto.board.BoardPlayerResponseDTO;
+import com.tanmay.boardwallet.dto.board.BoardSummaryResponseDTO;
 import com.tanmay.boardwallet.entity.Board;
 import com.tanmay.boardwallet.entity.User;
 import com.tanmay.boardwallet.entity.Wallet;
@@ -41,12 +42,7 @@ public class BoardDetailsService {
             UUID boardId,
             String username) {
 
-        User user = userRepository.findByUsername(username)
-                .orElseThrow(() ->
-                        new BadCredentialsException(
-                                "Authenticated user no longer exists"
-                        )
-                );
+        User user = findEnabledUser(username);
 
         if (!user.getEnabled()) {
             throw new DisabledException("Account is disabled");
@@ -77,6 +73,40 @@ public class BoardDetailsService {
                         .toList();
 
         return mapToBoardDetailsResponseDTO(board, players);
+    }
+
+    @Transactional(readOnly = true)
+    public List<BoardSummaryResponseDTO> listMyBoards(String username) {
+        User user = findEnabledUser(username);
+
+        return walletRepository
+                .findBoardsByUserIdAndWalletType(user.getId(), WalletType.PLAYER)
+                .stream()
+                .map(this::mapToBoardSummaryResponseDTO)
+                .toList();
+    }
+
+    private User findEnabledUser(String username) {
+        User user = userRepository.findByUsername(username)
+                .orElseThrow(() ->
+                        new BadCredentialsException(
+                                "Authenticated user no longer exists"
+                        )
+                );
+
+        if (!user.getEnabled()) {
+            throw new DisabledException("Account is disabled");
+        }
+
+        return user;
+    }
+
+    private BoardSummaryResponseDTO mapToBoardSummaryResponseDTO(Board board) {
+        BoardSummaryResponseDTO response = new BoardSummaryResponseDTO();
+        response.setBoardId(board.getId());
+        response.setName(board.getName());
+        response.setStatus(board.getStatus());
+        return response;
     }
 
     private BoardPlayerResponseDTO mapToPlayerResponseDTO(Wallet wallet) {
