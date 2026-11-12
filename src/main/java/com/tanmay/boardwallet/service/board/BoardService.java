@@ -137,4 +137,8 @@ public class BoardService {
     public List<BoardSummaryResponseDTO> listMyBoards(String username) {
         return boardDetailsService.listMyBoards(username);
     }
+
+    public BoardPlayerResponseDTO getMyWallet(UUID boardId, String username) {
+        return boardDetailsService.getMyWallet(boardId, username);
+    }
 }

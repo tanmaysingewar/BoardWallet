@@ -53,15 +53,7 @@ public class BoardDetailsService {
                         new ResourceNotFoundException("Board not found")
                 );
 
-        walletRepository.findByBoard_IdAndUser_Id(boardId, user.getId())
-                .filter(wallet ->
-                        wallet.getWalletType() == WalletType.PLAYER
-                )
-                .orElseThrow(() ->
-                        new AccessDeniedException(
-                                "You are not a member of this board"
-                        )
-                );
+        requirePlayerWallet(boardId, user.getId());
 
         List<BoardPlayerResponseDTO> players =
                 walletRepository.findBoardWalletsWithUsers(
@@ -84,6 +76,26 @@ public class BoardDetailsService {
                 .stream()
                 .map(this::mapToBoardSummaryResponseDTO)
                 .toList();
+    }
+
+    @Transactional(readOnly = true)
+    public BoardPlayerResponseDTO getMyWallet(UUID boardId, String username) {
+        User user = findEnabledUser(username);
+
+        if (!boardRepository.existsById(boardId)) {
+            throw new ResourceNotFoundException("Board not found");
+        }
+
+        Wallet wallet = requirePlayerWallet(boardId, user.getId());
+        return mapToPlayerResponseDTO(wallet);
+    }
+
+    private Wallet requirePlayerWallet(UUID boardId, UUID userId) {
+        return walletRepository.findByBoard_IdAndUser_Id(boardId, userId)
+                .filter(wallet -> wallet.getWalletType() == WalletType.PLAYER)
+                .orElseThrow(() -> new AccessDeniedException(
+                        "You are not a member of this board"
+                ));
     }
 
     private User findEnabledUser(String username) {

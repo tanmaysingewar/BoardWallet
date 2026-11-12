@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Requires a running BoardWallet app, curl, and jq.
-# Covers registration, login, board creation/list/join/start, player payments,
-# bank payments, bank payouts, and board finishing (including concurrent requests).
+# Covers registration, login, board creation/list/join/start, player wallet reads,
+# player payments, bank payments, bank payouts, and board finishing.
 # Creates two users and two boards with test payments; finishes both boards.
 # Leaves test data in the database for inspection.
 set -euo pipefail
@@ -141,6 +141,7 @@ CREATOR_WALLET=$(printf '%s' "$RESPONSE" | jq -er --arg name "$CREATOR" \
     '.players[] | select(.username == $name) | .walletId')
 PLAYER_WALLET=$(printf '%s' "$RESPONSE" | jq -er --arg name "$PLAYER" \
     '.players[] | select(.username == $name) | .walletId')
+MY_WALLET_PATH="$BOARD_PATH/wallets/me"
 PAYMENT_PATH="$BOARD_PATH/payments"
 
 payment_payload() {
@@ -156,6 +157,15 @@ bank_payment_payload() {
 bank_payout_payload() {
     jq -nc --argjson amount "$1" --arg reason "${2:-REWARD}" \
         '{amount: $amount, reason: $reason}'
+}
+
+assert_my_wallet() {
+    local token="$1" username="$2" wallet_id="$3" balance="$4"
+    request 200 GET "$MY_WALLET_PATH" "$token"
+    printf '%s' "$RESPONSE" | jq -e \
+        --arg username "$username" --arg walletId "$wallet_id" --argjson balance "$balance" \
+        '.username == $username and .walletId == $walletId and .balance == $balance' \
+        >/dev/null || fail "Expected $username to see wallet $wallet_id with balance $balance"
 }
 
 assert_balances() {
@@ -234,6 +244,12 @@ request 400 POST "$PAYMENT_PATH" "$CREATOR_TOKEN" \
     "$(payment_payload "$PLAYER_WALLET" 1001)" "$(uuidgen)"
 assert_balances 1000 2000
 
+echo 'Testing each member sees their own wallet and updated balance...'
+request 401 GET "$MY_WALLET_PATH"
+request 404 GET "/api/boards/$(uuidgen)/wallets/me" "$CREATOR_TOKEN"
+assert_my_wallet "$CREATOR_TOKEN" "$CREATOR" "$CREATOR_WALLET" 1000
+assert_my_wallet "$PLAYER_TOKEN" "$PLAYER" "$PLAYER_WALLET" 2000
+
 echo 'Testing concurrent duplicate requests...'
 CONCURRENT_KEY=$(uuidgen)
 PAYLOAD=$(payment_payload "$PLAYER_WALLET" 100)
@@ -301,6 +317,7 @@ printf '%s' "$RESPONSE" | jq -e --arg board "$BOARD_ID" \
     'map(.boardId) == [$board]' >/dev/null ||
     fail 'Player must see only the board they joined'
 
+request 403 GET "$OTHER_PATH/wallets/me" "$PLAYER_TOKEN"
 request 401 POST "$OTHER_PATH/finish"
 request 403 POST "$OTHER_PATH/finish" "$PLAYER_TOKEN"
 request 409 POST "$OTHER_PATH/finish" "$CREATOR_TOKEN"
@@ -727,9 +744,12 @@ printf '%s' "$RESPONSE" | jq -e --arg first "$BOARD_ID" --arg second "$OTHER_BOA
         {boardId: $second, status: "FINISHED"},
         {boardId: $first, status: "FINISHED"}
     ]' >/dev/null || fail 'Both joined boards must remain listed with FINISHED status'
+echo 'Testing members can still read their final wallet balances...'
+assert_my_wallet "$CREATOR_TOKEN" "$CREATOR" "$CREATOR_WALLET" "$CREATOR_BALANCE"
+assert_my_wallet "$PLAYER_TOKEN" "$PLAYER" "$PLAYER_WALLET" "$FINAL_PLAYER_BALANCE"
 assert_balances "$CREATOR_BALANCE" "$FINAL_PLAYER_BALANCE" FINISHED
 
-printf '\nAll board-list, board-start, player-payment, bank-payment, bank-payout, and board-finish API checks passed. Board: %s\n' "$BOARD_ID"
+printf '\nAll board-list, board-start, player-wallet, player-payment, bank-payment, bank-payout, and board-finish API checks passed. Board: %s\n' "$BOARD_ID"
 printf '%s\n' "$RESPONSE" | jq .
 echo "Additional board (also finished): $OTHER_BOARD_ID"
 echo 'This checks API responses and balances; database history, finishedAt persistence, and forced mid-payment rollback need separate checks.'
