@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Requires a running BoardWallet app, curl, and jq.
-# Covers registration, login, board creation/list/join/start, player wallet and bank reads,
+# Covers registration, login, board creation/list/join/start, wallet and bank reads, transaction history,
 # player payments, bank payments, bank payouts, and board finishing.
 # Creates two users and two boards with test payments; finishes both boards.
 # Leaves test data in the database for inspection.
@@ -104,6 +104,15 @@ BOARD_ID=$(printf '%s' "$RESPONSE" | jq -er '.id | select(type == "string" and l
 JOIN_CODE=$(printf '%s' "$RESPONSE" | jq -er '.joinCode | select(type == "string" and length > 0)')
 BOARD_PATH="/api/boards/$BOARD_ID"
 BANK_PATH="$BOARD_PATH/bank"
+HISTORY_PATH="$BOARD_PATH/transactions"
+
+echo 'Testing transaction history access and empty results...'
+request 401 GET "$HISTORY_PATH"
+request 403 GET "$HISTORY_PATH" "$PLAYER_TOKEN"
+request 404 GET "/api/boards/$(uuidgen)/transactions" "$CREATOR_TOKEN"
+request 200 GET "$HISTORY_PATH" "$CREATOR_TOKEN"
+assert_json '.content == [] and .page == {size: 20, number: 0, totalElements: 0, totalPages: 0}' \
+    'A waiting board must return an empty history with default pagination'
 
 echo 'Testing bank details on a waiting board...'
 request 401 GET "$BANK_PATH"
@@ -158,6 +167,8 @@ done
 # Resolve wallets from the member-only board details response.
 CREATOR_WALLET=$(printf '%s' "$RESPONSE" | jq -er --arg name "$CREATOR" \
     '.players[] | select(.username == $name) | .walletId')
+CREATOR_ID=$(printf '%s' "$RESPONSE" | jq -er --arg name "$CREATOR" \
+    '.players[] | select(.username == $name) | .userId')
 PLAYER_WALLET=$(printf '%s' "$RESPONSE" | jq -er --arg name "$PLAYER" \
     '.players[] | select(.username == $name) | .walletId')
 MY_WALLET_PATH="$BOARD_PATH/wallets/me"
@@ -267,6 +278,42 @@ request 400 POST "$PAYMENT_PATH" "$CREATOR_TOKEN" \
     "$(payment_payload "$PLAYER_WALLET" 1001)" "$(uuidgen)"
 assert_balances 1000 2000
 
+echo 'Testing newest-first history, page boundaries, and wallet filtering...'
+request 200 GET "$HISTORY_PATH?size=2" "$PLAYER_TOKEN"
+printf '%s' "$RESPONSE" | jq -e --argjson payment "$ORIGINAL_PAYMENT" --arg initiator "$CREATOR_ID" \
+    '.page == {size: 2, number: 0, totalElements: 3, totalPages: 2} and
+     (.content | length) == 2 and
+     (.content[0] | del(.initiatedByUserId, .createdAt)) == ($payment | del(.createdAt)) and
+     .content[0].initiatedByUserId == $initiator and
+     (.content[0].createdAt | type == "string" and length > 0) and
+     .content[1].reason == "STARTING_MONEY"' >/dev/null ||
+    fail 'First page must contain the player payment followed by a starting-money transfer'
+FIRST_PAGE_IDS=$(printf '%s' "$RESPONSE" | jq -c '[.content[].transactionId]')
+
+request 200 GET "$HISTORY_PATH?page=1&size=2" "$PLAYER_TOKEN"
+printf '%s' "$RESPONSE" | jq -e --argjson firstPageIds "$FIRST_PAGE_IDS" \
+    '.page == {size: 2, number: 1, totalElements: 3, totalPages: 2} and
+     (.content | length) == 1 and .content[0].reason == "STARTING_MONEY" and
+     (.content[0].transactionId as $id | ($firstPageIds | index($id)) == null)' >/dev/null ||
+    fail 'Second page must contain the remaining starting-money transfer without overlap'
+request 200 GET "$HISTORY_PATH?page=2&size=2" "$PLAYER_TOKEN"
+assert_json '.content == [] and .page == {size: 2, number: 2, totalElements: 3, totalPages: 2}' \
+    'A page past the end must be empty and preserve the total count'
+
+request 200 GET "$HISTORY_PATH?walletId=$CREATOR_WALLET&size=1" "$PLAYER_TOKEN"
+printf '%s' "$RESPONSE" | jq -e --arg wallet "$CREATOR_WALLET" \
+    '.page == {size: 1, number: 0, totalElements: 2, totalPages: 2} and
+     (.content | length) == 1 and .content[0].fromWalletId == $wallet and .content[0].reason == "RENT"' \
+    >/dev/null || fail 'Wallet history must count both directions and show the newest outgoing payment'
+request 200 GET "$HISTORY_PATH?walletId=$CREATOR_WALLET&page=1&size=1" "$PLAYER_TOKEN"
+printf '%s' "$RESPONSE" | jq -e --arg wallet "$CREATOR_WALLET" \
+    '(.content | length) == 1 and .content[0].toWalletId == $wallet and .content[0].reason == "STARTING_MONEY"' \
+    >/dev/null || fail 'Wallet history must include the incoming starting-money transfer'
+
+for query in 'page=-1' 'size=0' 'size=101' 'page=2147483647&size=2' 'walletId=not-a-uuid'; do
+    request 400 GET "$HISTORY_PATH?$query" "$CREATOR_TOKEN"
+done
+
 echo 'Testing each member sees their own wallet and updated balance...'
 request 401 GET "$MY_WALLET_PATH"
 request 404 GET "/api/boards/$(uuidgen)/wallets/me" "$CREATOR_TOKEN"
@@ -349,6 +396,9 @@ request 200 GET "$OTHER_PATH" "$CREATOR_TOKEN"
 assert_json '.status == "WAITING" and (.players | length) == 1 and .players[0].balance == 0' \
     'Rejected finish requests must leave the waiting board unchanged'
 OTHER_CREATOR_WALLET=$(printf '%s' "$RESPONSE" | jq -er '.players[0].walletId')
+request 200 GET "$HISTORY_PATH?walletId=$OTHER_CREATOR_WALLET" "$CREATOR_TOKEN"
+assert_json '.content == [] and .page.totalElements == 0' \
+    'Filtering by a wallet on another board must return no transactions'
 request 403 POST "$OTHER_PATH/payments" "$PLAYER_TOKEN" \
     "$(payment_payload "$OTHER_CREATOR_WALLET" 10)" "$(uuidgen)"
 request 403 POST "$OTHER_PATH/payments/bank" "$PLAYER_TOKEN" \
@@ -767,6 +817,10 @@ printf '%s' "$RESPONSE" | jq -e \
     >/dev/null || fail 'Finish/payment race must preserve exactly the accepted balance changes'
 echo 'Testing bank totals on a finished board with an independent ledger...'
 assert_bank_totals "$OTHER_PATH/bank" "$PLAYER_TOKEN" 0 "$((STARTING_TOTAL + 100))"
+request 200 GET "$OTHER_PATH/transactions" "$PLAYER_TOKEN"
+printf '%s' "$RESPONSE" | jq -e --arg board "$OTHER_BOARD_ID" \
+    'all(.content[]; .boardId == $board) and any(.content[]; .reason == "REWARD")' \
+    >/dev/null || fail 'Members must still see the finished board history scoped to that board'
 
 echo 'Testing finished boards remain listed for their members...'
 request 200 GET /api/boards "$PLAYER_TOKEN"
@@ -780,7 +834,7 @@ assert_my_wallet "$CREATOR_TOKEN" "$CREATOR" "$CREATOR_WALLET" "$CREATOR_BALANCE
 assert_my_wallet "$PLAYER_TOKEN" "$PLAYER" "$PLAYER_WALLET" "$FINAL_PLAYER_BALANCE"
 assert_balances "$CREATOR_BALANCE" "$FINAL_PLAYER_BALANCE" FINISHED
 
-printf '\nAll board-list, board-start, player-wallet, player-payment, bank-details, bank-payment, bank-payout, and board-finish API checks passed. Board: %s\n' "$BOARD_ID"
+printf '\nAll board-list, board-start, player-wallet, player-payment, bank-details, bank-payment, bank-payout, board-finish, and transaction-history API checks passed. Board: %s\n' "$BOARD_ID"
 printf '%s\n' "$RESPONSE" | jq .
 echo "Additional board (also finished): $OTHER_BOARD_ID"
-echo 'This checks API responses and balances; database history, finishedAt persistence, and forced mid-payment rollback need separate checks.'
+echo 'This checks API responses, balances, and visible history; direct database checks and forced mid-payment rollback are separate.'

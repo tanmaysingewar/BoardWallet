@@ -1,10 +1,13 @@
 package com.tanmay.boardwallet.service.board;
 
 import com.tanmay.boardwallet.dto.board.*;
+import com.tanmay.boardwallet.dto.payment.TransactionHistoryResponseDTO;
 import com.tanmay.boardwallet.exception.JoinCodeGenerationException;
 import com.tanmay.boardwallet.repository.BoardRepository;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.dao.PessimisticLockingFailureException;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
@@ -144,5 +147,16 @@ public class BoardService {
 
     public BankDetailsResponseDTO getBankDetails(UUID boardId, String username) {
         return boardDetailsService.getBankDetails(boardId, username);
+    }
+
+    public Page<TransactionHistoryResponseDTO> getTransactionHistory(
+            UUID boardId,
+            UUID walletId,
+            Pageable pageable,
+            String username) {
+
+        return boardDetailsService.getTransactionHistory(
+                boardId, walletId, pageable, username
+        );
     }
 }

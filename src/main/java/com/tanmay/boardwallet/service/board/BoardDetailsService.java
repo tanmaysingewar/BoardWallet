@@ -4,7 +4,9 @@ import com.tanmay.boardwallet.dto.board.BankDetailsResponseDTO;
 import com.tanmay.boardwallet.dto.board.BoardDetailsResponseDTO;
 import com.tanmay.boardwallet.dto.board.BoardPlayerResponseDTO;
 import com.tanmay.boardwallet.dto.board.BoardSummaryResponseDTO;
+import com.tanmay.boardwallet.dto.payment.TransactionHistoryResponseDTO;
 import com.tanmay.boardwallet.entity.Board;
+import com.tanmay.boardwallet.entity.GameTransaction;
 import com.tanmay.boardwallet.entity.User;
 import com.tanmay.boardwallet.entity.Wallet;
 import com.tanmay.boardwallet.entity.constant.WalletType;
@@ -13,6 +15,8 @@ import com.tanmay.boardwallet.repository.BoardRepository;
 import com.tanmay.boardwallet.repository.GameTransactionRepository;
 import com.tanmay.boardwallet.repository.UserRepository;
 import com.tanmay.boardwallet.repository.WalletRepository;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
 import org.springframework.security.access.AccessDeniedException;
 import org.springframework.security.authentication.BadCredentialsException;
 import org.springframework.security.authentication.DisabledException;
@@ -119,6 +123,41 @@ public class BoardDetailsService {
         response.setUnlimitedFunds(true);
         response.setTotalReceived(totals.getTotalReceived());
         response.setTotalPaidOut(totals.getTotalPaidOut());
+        return response;
+    }
+
+    @Transactional(readOnly = true)
+    public Page<TransactionHistoryResponseDTO> getTransactionHistory(
+            UUID boardId,
+            UUID walletId,
+            Pageable pageable,
+            String username) {
+
+        User user = findEnabledUser(username);
+
+        if (!boardRepository.existsById(boardId)) {
+            throw new ResourceNotFoundException("Board not found");
+        }
+
+        requirePlayerWallet(boardId, user.getId());
+
+        return gameTransactionRepository
+                .findBoardTransactionHistory(boardId, walletId, pageable)
+                .map(this::mapToTransactionHistoryResponseDTO);
+    }
+
+    private TransactionHistoryResponseDTO mapToTransactionHistoryResponseDTO(
+            GameTransaction transaction) {
+
+        TransactionHistoryResponseDTO response = new TransactionHistoryResponseDTO();
+        response.setTransactionId(transaction.getId());
+        response.setBoardId(transaction.getBoard().getId());
+        response.setFromWalletId(transaction.getFromWallet().getId());
+        response.setToWalletId(transaction.getToWallet().getId());
+        response.setInitiatedByUserId(transaction.getInitiatedBy().getId());
+        response.setAmount(transaction.getAmount());
+        response.setReason(transaction.getReason());
+        response.setCreatedAt(transaction.getCreatedAt());
         return response;
     }
 

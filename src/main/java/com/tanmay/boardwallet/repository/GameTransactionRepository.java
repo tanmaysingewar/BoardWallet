@@ -1,6 +1,8 @@
 package com.tanmay.boardwallet.repository;
 
 import com.tanmay.boardwallet.entity.GameTransaction;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
@@ -36,4 +38,19 @@ public interface GameTransactionRepository
         BigDecimal getTotalReceived();
         BigDecimal getTotalPaidOut();
     }
+
+    @Query("""
+        SELECT t
+        FROM GameTransaction t
+        WHERE t.board.id = :boardId
+          AND (:walletId IS NULL
+               OR t.fromWallet.id = :walletId
+               OR t.toWallet.id = :walletId)
+        ORDER BY t.createdAt DESC, t.id DESC
+        """)
+    Page<GameTransaction> findBoardTransactionHistory(
+            @Param("boardId") UUID boardId,
+            @Param("walletId") UUID walletId,
+            Pageable pageable
+    );
 }
