@@ -2,7 +2,10 @@ package com.tanmay.boardwallet.repository;
 
 import com.tanmay.boardwallet.entity.GameTransaction;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Query;
+import org.springframework.data.repository.query.Param;
 
+import java.math.BigDecimal;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -13,4 +16,24 @@ public interface GameTransactionRepository
             UUID userId,
             UUID idempotencyKey
     );
+
+    @Query("""
+        SELECT
+            COALESCE(SUM(CASE WHEN t.toWallet.id = :walletId
+                              THEN t.amount ELSE 0 END), 0) AS totalReceived,
+            COALESCE(SUM(CASE WHEN t.fromWallet.id = :walletId
+                              THEN t.amount ELSE 0 END), 0) AS totalPaidOut
+        FROM GameTransaction t
+        WHERE t.board.id = :boardId
+          AND (t.toWallet.id = :walletId OR t.fromWallet.id = :walletId)
+        """)
+    BankTotals findBankTotals(
+            @Param("boardId") UUID boardId,
+            @Param("walletId") UUID walletId
+    );
+
+    interface BankTotals {
+        BigDecimal getTotalReceived();
+        BigDecimal getTotalPaidOut();
+    }
 }

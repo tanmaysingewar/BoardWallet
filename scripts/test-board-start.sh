@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Requires a running BoardWallet app, curl, and jq.
-# Covers registration, login, board creation/list/join/start, player wallet reads,
+# Covers registration, login, board creation/list/join/start, player wallet and bank reads,
 # player payments, bank payments, bank payouts, and board finishing.
 # Creates two users and two boards with test payments; finishes both boards.
 # Leaves test data in the database for inspection.
@@ -66,6 +66,17 @@ assert_json() {
     printf '%s' "$RESPONSE" | jq -e "$expression" >/dev/null || fail "$message"
 }
 
+assert_bank_totals() {
+    local path="$1" token="$2" received="$3" paid_out="$4" wallet_id="${5:-}"
+    request 200 GET "$path" "$token"
+    printf '%s' "$RESPONSE" | jq -e \
+        --arg walletId "$wallet_id" --argjson received "$received" --argjson paidOut "$paid_out" \
+        '(.walletId | type == "string" and length > 0) and
+         ($walletId == "" or .walletId == $walletId) and .unlimitedFunds == true and
+         .totalReceived == $received and .totalPaidOut == $paidOut' >/dev/null ||
+        fail "Expected $path to report unlimited funds, received=$received, paid out=$paid_out"
+}
+
 credentials() {
     jq -nc --arg username "$1" --arg password "$PASSWORD" \
         '{username: $username, password: $password}'
@@ -92,6 +103,14 @@ assert_json '.status == "WAITING"' 'New board must be WAITING'
 BOARD_ID=$(printf '%s' "$RESPONSE" | jq -er '.id | select(type == "string" and length > 0)')
 JOIN_CODE=$(printf '%s' "$RESPONSE" | jq -er '.joinCode | select(type == "string" and length > 0)')
 BOARD_PATH="/api/boards/$BOARD_ID"
+BANK_PATH="$BOARD_PATH/bank"
+
+echo 'Testing bank details on a waiting board...'
+request 401 GET "$BANK_PATH"
+request 403 GET "$BANK_PATH" "$PLAYER_TOKEN"
+request 404 GET "/api/boards/$(uuidgen)/bank" "$CREATOR_TOKEN"
+assert_bank_totals "$BANK_PATH" "$CREATOR_TOKEN" 0 0
+BANK_WALLET=$(printf '%s' "$RESPONSE" | jq -er '.walletId')
 
 request 401 POST "$BOARD_PATH/start"
 request 409 POST "$BOARD_PATH/start" "$CREATOR_TOKEN"
@@ -143,6 +162,10 @@ PLAYER_WALLET=$(printf '%s' "$RESPONSE" | jq -er --arg name "$PLAYER" \
     '.players[] | select(.username == $name) | .walletId')
 MY_WALLET_PATH="$BOARD_PATH/wallets/me"
 PAYMENT_PATH="$BOARD_PATH/payments"
+
+echo 'Testing that starting money counts toward bank payouts...'
+STARTING_TOTAL=$((2 * STARTING_AMOUNT))
+assert_bank_totals "$BANK_PATH" "$PLAYER_TOKEN" 0 "$STARTING_TOTAL" "$BANK_WALLET"
 
 payment_payload() {
     jq -nc --arg recipient "$1" --argjson amount "$2" --arg reason "${3:-RENT}" \
@@ -376,11 +399,10 @@ echo 'Testing successful bank payment and normalized-amount replay...'
 BANK_PAYMENT_KEY=$(uuidgen)
 request 200 POST "$BANK_PAYMENT_PATH" "$CREATOR_TOKEN" "$BANK_PAYLOAD" "$BANK_PAYMENT_KEY"
 ORIGINAL_BANK_PAYMENT="$RESPONSE"
-BANK_WALLET=$(printf '%s' "$RESPONSE" | jq -er '.toWalletId | select(type == "string" and length > 0)')
 printf '%s' "$RESPONSE" | jq -e \
-    --arg board "$BOARD_ID" --arg sender "$CREATOR_WALLET" --arg player "$PLAYER_WALLET" \
+    --arg board "$BOARD_ID" --arg sender "$CREATOR_WALLET" --arg bank "$BANK_WALLET" \
     '.boardId == $board and .fromWalletId == $sender and
-     .toWalletId != $sender and .toWalletId != $player and
+     .toWalletId == $bank and
      .amount == 25 and .reason == "PENALTY" and
      (.transactionId | type == "string" and length > 0) and
      (.createdAt | type == "string" and length > 0)' >/dev/null || fail 'Incorrect bank-payment response'
@@ -388,6 +410,7 @@ assert_balances 75 2900
 request 200 POST "$BANK_PAYMENT_PATH" "$CREATOR_TOKEN" \
     '{"amount":25.00,"reason":"PENALTY"}' "$BANK_PAYMENT_KEY"
 assert_same_payment "$ORIGINAL_BANK_PAYMENT"
+assert_bank_totals "$BANK_PATH" "$PLAYER_TOKEN" 25 "$STARTING_TOTAL" "$BANK_WALLET"
 request 409 POST "$BANK_PAYMENT_PATH" "$CREATOR_TOKEN" \
     "$(bank_payment_payload 26)" "$BANK_PAYMENT_KEY"
 request 409 POST "$BANK_PAYMENT_PATH" "$CREATOR_TOKEN" \
@@ -535,6 +558,12 @@ printf '%s' "$RESPONSE" | jq -e \
 request 200 POST "$BANK_PAYOUT_PATH" "$CREATOR_TOKEN" \
     '{"amount":100.00,"reason":"REWARD"}' "$PAYOUT_KEY"
 assert_same_payment "$ORIGINAL_PAYOUT"
+# Before this first payout, the creator had zero and all other player funds
+# were in the second wallet. The difference from starting money went to the bank.
+BANK_RECEIVED=$(jq -n --argjson start "$STARTING_TOTAL" \
+    --argjson playerBalance "$FINAL_PLAYER_BALANCE" '$start - $playerBalance')
+assert_bank_totals "$BANK_PATH" "$PLAYER_TOKEN" "$BANK_RECEIVED" \
+    "$((STARTING_TOTAL + 100))" "$BANK_WALLET"
 request 409 POST "$BANK_PAYOUT_PATH" "$CREATOR_TOKEN" \
     "$(bank_payout_payload 101)" "$PAYOUT_KEY"
 request 409 POST "$BANK_PAYOUT_PATH" "$CREATOR_TOKEN" \
@@ -736,6 +765,8 @@ printf '%s' "$RESPONSE" | jq -e \
      ([.players[] | select(.username == $creator) | .balance] == [$creatorBalance]) and
      ([.players[] | select(.username == $player) | .balance] == [$playerBalance])' \
     >/dev/null || fail 'Finish/payment race must preserve exactly the accepted balance changes'
+echo 'Testing bank totals on a finished board with an independent ledger...'
+assert_bank_totals "$OTHER_PATH/bank" "$PLAYER_TOKEN" 0 "$((STARTING_TOTAL + 100))"
 
 echo 'Testing finished boards remain listed for their members...'
 request 200 GET /api/boards "$PLAYER_TOKEN"
@@ -749,7 +780,7 @@ assert_my_wallet "$CREATOR_TOKEN" "$CREATOR" "$CREATOR_WALLET" "$CREATOR_BALANCE
 assert_my_wallet "$PLAYER_TOKEN" "$PLAYER" "$PLAYER_WALLET" "$FINAL_PLAYER_BALANCE"
 assert_balances "$CREATOR_BALANCE" "$FINAL_PLAYER_BALANCE" FINISHED
 
-printf '\nAll board-list, board-start, player-wallet, player-payment, bank-payment, bank-payout, and board-finish API checks passed. Board: %s\n' "$BOARD_ID"
+printf '\nAll board-list, board-start, player-wallet, player-payment, bank-details, bank-payment, bank-payout, and board-finish API checks passed. Board: %s\n' "$BOARD_ID"
 printf '%s\n' "$RESPONSE" | jq .
 echo "Additional board (also finished): $OTHER_BOARD_ID"
 echo 'This checks API responses and balances; database history, finishedAt persistence, and forced mid-payment rollback need separate checks.'

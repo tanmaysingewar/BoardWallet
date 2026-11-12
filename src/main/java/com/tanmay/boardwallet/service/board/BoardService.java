@@ -141,4 +141,8 @@ public class BoardService {
     public BoardPlayerResponseDTO getMyWallet(UUID boardId, String username) {
         return boardDetailsService.getMyWallet(boardId, username);
     }
+
+    public BankDetailsResponseDTO getBankDetails(UUID boardId, String username) {
+        return boardDetailsService.getBankDetails(boardId, username);
+    }
 }

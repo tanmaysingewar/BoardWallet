@@ -102,4 +102,14 @@ public class BoardController {
                 boardService.getMyWallet(boardId, authentication.getName())
         );
     }
+
+    @GetMapping("/{boardId}/bank")
+    public ResponseEntity<BankDetailsResponseDTO> getBankDetails(
+            @PathVariable("boardId") UUID boardId,
+            Authentication authentication) {
+
+        return ResponseEntity.ok(
+                boardService.getBankDetails(boardId, authentication.getName())
+        );
+    }
 }

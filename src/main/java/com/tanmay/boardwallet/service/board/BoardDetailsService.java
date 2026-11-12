@@ -1,5 +1,6 @@
 package com.tanmay.boardwallet.service.board;
 
+import com.tanmay.boardwallet.dto.board.BankDetailsResponseDTO;
 import com.tanmay.boardwallet.dto.board.BoardDetailsResponseDTO;
 import com.tanmay.boardwallet.dto.board.BoardPlayerResponseDTO;
 import com.tanmay.boardwallet.dto.board.BoardSummaryResponseDTO;
@@ -9,6 +10,7 @@ import com.tanmay.boardwallet.entity.Wallet;
 import com.tanmay.boardwallet.entity.constant.WalletType;
 import com.tanmay.boardwallet.exception.ResourceNotFoundException;
 import com.tanmay.boardwallet.repository.BoardRepository;
+import com.tanmay.boardwallet.repository.GameTransactionRepository;
 import com.tanmay.boardwallet.repository.UserRepository;
 import com.tanmay.boardwallet.repository.WalletRepository;
 import org.springframework.security.access.AccessDeniedException;
@@ -26,15 +28,18 @@ public class BoardDetailsService {
     private final BoardRepository boardRepository;
     private final UserRepository userRepository;
     private final WalletRepository walletRepository;
+    private final GameTransactionRepository gameTransactionRepository;
 
     public BoardDetailsService(
             BoardRepository boardRepository,
             UserRepository userRepository,
-            WalletRepository walletRepository) {
+            WalletRepository walletRepository,
+            GameTransactionRepository gameTransactionRepository) {
 
         this.boardRepository = boardRepository;
         this.userRepository = userRepository;
         this.walletRepository = walletRepository;
+        this.gameTransactionRepository = gameTransactionRepository;
     }
 
     @Transactional(readOnly = true)
@@ -88,6 +93,33 @@ public class BoardDetailsService {
 
         Wallet wallet = requirePlayerWallet(boardId, user.getId());
         return mapToPlayerResponseDTO(wallet);
+    }
+
+    @Transactional(readOnly = true)
+    public BankDetailsResponseDTO getBankDetails(UUID boardId, String username) {
+        User user = findEnabledUser(username);
+
+        if (!boardRepository.existsById(boardId)) {
+            throw new ResourceNotFoundException("Board not found");
+        }
+
+        requirePlayerWallet(boardId, user.getId());
+
+        UUID bankWalletId = walletRepository
+                .findWalletIdByBoardAndType(boardId, WalletType.BANK)
+                .orElseThrow(() -> new IllegalStateException(
+                        "Board is missing its bank wallet"
+                ));
+
+        GameTransactionRepository.BankTotals totals =
+                gameTransactionRepository.findBankTotals(boardId, bankWalletId);
+
+        BankDetailsResponseDTO response = new BankDetailsResponseDTO();
+        response.setWalletId(bankWalletId);
+        response.setUnlimitedFunds(true);
+        response.setTotalReceived(totals.getTotalReceived());
+        response.setTotalPaidOut(totals.getTotalPaidOut());
+        return response;
     }
 
     private Wallet requirePlayerWallet(UUID boardId, UUID userId) {
