@@ -53,4 +53,6 @@ public interface GameTransactionRepository
             @Param("walletId") UUID walletId,
             Pageable pageable
     );
+
+    Optional<GameTransaction> findByBoard_IdAndId(UUID boardId, UUID transactionId);
 }

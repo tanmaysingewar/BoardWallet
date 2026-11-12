@@ -145,4 +145,17 @@ public class BoardController {
 
         return ResponseEntity.ok(new PagedModel<>(transactions));
     }
+
+    @GetMapping("/{boardId}/transactions/{transactionId}")
+    public ResponseEntity<TransactionHistoryResponseDTO> getTransactionDetails(
+            @PathVariable("boardId") UUID boardId,
+            @PathVariable("transactionId") UUID transactionId,
+            Authentication authentication) {
+
+        return ResponseEntity.ok(
+                boardService.getTransactionDetails(
+                        boardId, transactionId, authentication.getName()
+                )
+        );
+    }
 }

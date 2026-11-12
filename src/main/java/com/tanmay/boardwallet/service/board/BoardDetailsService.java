@@ -219,4 +219,27 @@ public class BoardDetailsService {
 
         return response;
     }
+
+    @Transactional(readOnly = true)
+    public TransactionHistoryResponseDTO getTransactionDetails(
+            UUID boardId,
+            UUID transactionId,
+            String username) {
+
+        User user = findEnabledUser(username);
+
+        if (!boardRepository.existsById(boardId)) {
+            throw new ResourceNotFoundException("Board not found");
+        }
+
+        requirePlayerWallet(boardId, user.getId());
+
+        GameTransaction transaction = gameTransactionRepository
+                .findByBoard_IdAndId(boardId, transactionId)
+                .orElseThrow(() -> new ResourceNotFoundException(
+                        "Transaction not found on this board"
+                ));
+
+        return mapToTransactionHistoryResponseDTO(transaction);
+    }
 }

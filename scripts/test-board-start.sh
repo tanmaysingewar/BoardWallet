@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Requires a running BoardWallet app, curl, and jq.
-# Covers registration, login, board creation/list/join/start, wallet and bank reads, transaction history,
+# Covers registration, login, board creation/list/join/start, wallet and bank reads, transaction reads,
 # player payments, bank payments, bank payouts, and board finishing.
 # Creates two users and two boards with test payments; finishes both boards.
 # Leaves test data in the database for inspection.
@@ -289,6 +289,20 @@ printf '%s' "$RESPONSE" | jq -e --argjson payment "$ORIGINAL_PAYMENT" --arg init
      .content[1].reason == "STARTING_MONEY"' >/dev/null ||
     fail 'First page must contain the player payment followed by a starting-money transfer'
 FIRST_PAGE_IDS=$(printf '%s' "$RESPONSE" | jq -c '[.content[].transactionId]')
+HISTORY_PAYMENT=$(printf '%s' "$RESPONSE" | jq -ec '.content[0]')
+HISTORY_PAYMENT_ID=$(printf '%s' "$HISTORY_PAYMENT" | jq -er '.transactionId')
+TRANSACTION_PATH="$HISTORY_PATH/$HISTORY_PAYMENT_ID"
+
+echo 'Testing transaction details match the history entry for both board members...'
+for token in "$CREATOR_TOKEN" "$PLAYER_TOKEN"; do
+    request 200 GET "$TRANSACTION_PATH" "$token"
+    printf '%s' "$RESPONSE" | jq -e --argjson expected "$HISTORY_PAYMENT" \
+        '. == $expected' >/dev/null || fail 'Transaction details must match the history entry'
+done
+request 401 GET "$TRANSACTION_PATH"
+request 400 GET "$HISTORY_PATH/not-a-uuid" "$CREATOR_TOKEN"
+request 404 GET "$HISTORY_PATH/$(uuidgen)" "$CREATOR_TOKEN"
+request 404 GET "/api/boards/$(uuidgen)/transactions/$HISTORY_PAYMENT_ID" "$CREATOR_TOKEN"
 
 request 200 GET "$HISTORY_PATH?page=1&size=2" "$PLAYER_TOKEN"
 printf '%s' "$RESPONSE" | jq -e --argjson firstPageIds "$FIRST_PAGE_IDS" \
@@ -372,6 +386,10 @@ request 200 POST /api/boards "$CREATOR_TOKEN" \
 OTHER_BOARD_ID=$(printf '%s' "$RESPONSE" | jq -er '.id')
 OTHER_JOIN_CODE=$(printf '%s' "$RESPONSE" | jq -er '.joinCode')
 OTHER_PATH="/api/boards/$OTHER_BOARD_ID"
+
+echo 'Testing transaction detail membership and board isolation...'
+request 403 GET "$OTHER_PATH/transactions/$HISTORY_PAYMENT_ID" "$PLAYER_TOKEN"
+request 404 GET "$OTHER_PATH/transactions/$HISTORY_PAYMENT_ID" "$CREATOR_TOKEN"
 
 echo 'Testing board summaries, newest-first order, and membership filtering...'
 request 200 GET /api/boards "$CREATOR_TOKEN"
@@ -821,6 +839,9 @@ request 200 GET "$OTHER_PATH/transactions" "$PLAYER_TOKEN"
 printf '%s' "$RESPONSE" | jq -e --arg board "$OTHER_BOARD_ID" \
     'all(.content[]; .boardId == $board) and any(.content[]; .reason == "REWARD")' \
     >/dev/null || fail 'Members must still see the finished board history scoped to that board'
+request 200 GET "$TRANSACTION_PATH" "$PLAYER_TOKEN"
+printf '%s' "$RESPONSE" | jq -e --argjson expected "$HISTORY_PAYMENT" \
+    '. == $expected' >/dev/null || fail 'Members must still see transaction details after finish'
 
 echo 'Testing finished boards remain listed for their members...'
 request 200 GET /api/boards "$PLAYER_TOKEN"
@@ -834,7 +855,7 @@ assert_my_wallet "$CREATOR_TOKEN" "$CREATOR" "$CREATOR_WALLET" "$CREATOR_BALANCE
 assert_my_wallet "$PLAYER_TOKEN" "$PLAYER" "$PLAYER_WALLET" "$FINAL_PLAYER_BALANCE"
 assert_balances "$CREATOR_BALANCE" "$FINAL_PLAYER_BALANCE" FINISHED
 
-printf '\nAll board-list, board-start, player-wallet, player-payment, bank-details, bank-payment, bank-payout, board-finish, and transaction-history API checks passed. Board: %s\n' "$BOARD_ID"
+printf '\nAll board-list, board-start, player-wallet, player-payment, bank-details, bank-payment, bank-payout, board-finish, transaction-history, and transaction-detail API checks passed. Board: %s\n' "$BOARD_ID"
 printf '%s\n' "$RESPONSE" | jq .
 echo "Additional board (also finished): $OTHER_BOARD_ID"
 echo 'This checks API responses, balances, and visible history; direct database checks and forced mid-payment rollback are separate.'

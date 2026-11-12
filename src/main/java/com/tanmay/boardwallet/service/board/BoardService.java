@@ -159,4 +159,14 @@ public class BoardService {
                 boardId, walletId, pageable, username
         );
     }
+
+    public TransactionHistoryResponseDTO getTransactionDetails(
+            UUID boardId,
+            UUID transactionId,
+            String username) {
+
+        return boardDetailsService.getTransactionDetails(
+                boardId, transactionId, username
+        );
+    }
 }
