@@ -33,18 +33,20 @@ public class JwtService {
     }
 
     public String generateToken(Authentication authentication) {
+        return generateToken(authentication.getName());
+    }
+
+    public String generateToken(String username) {
         Instant now = Instant.now();
 
         JwtClaimsSet claims = JwtClaimsSet.builder()
                 .issuer(issuer)
-                .subject(authentication.getName())
+                .subject(username)
                 .issuedAt(now)
                 .expiresAt(now.plusSeconds(expiry))
                 .build();
 
-        JwsHeader header = JwsHeader
-                .with(MacAlgorithm.HS256)
-                .build();
+        JwsHeader header = JwsHeader.with(MacAlgorithm.HS256).build();
 
         return jwtEncoder.encode(
                 JwtEncoderParameters.from(header, claims)

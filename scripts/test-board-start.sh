@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Requires a running BoardWallet app, curl, and jq.
-# Covers registration, login, board creation/list/join/start, wallet and bank reads, transaction reads,
+# Requires a running BoardWallet app, curl, jq, rg, and uuidgen.
+# Covers registration, login, refresh rotation/reuse, logout, board creation/list/join/start,
+# wallet and bank reads, transaction reads,
 # player payments, bank payments, bank payouts, and board finishing.
 # Creates two users and two boards with test payments; finishes both boards.
 # Leaves test data in the database for inspection.
@@ -8,7 +9,7 @@ set -euo pipefail
 
 BASE_URL="${BASE_URL:-http://localhost:8080}"
 BASE_URL="${BASE_URL%/}"
-for dependency in curl jq uuidgen; do
+for dependency in curl jq rg uuidgen; do
     command -v "$dependency" >/dev/null || {
         echo "Missing dependency: $dependency" >&2
         exit 1
@@ -33,6 +34,7 @@ fail() {
 # Pass bearer tokens through stdin rather than exposing them in curl arguments.
 http() {
     local method="$1" path="$2" token="$3" payload="$4" output="$5" key="${6:-}"
+    local cookie_in="${7:-}" cookie_out="${8:-}" refresh_header="${9:-}"
     local -a args
     args=(--silent --show-error --connect-timeout 5 --max-time 45
           --request "$method" --output "$output" --write-out '%{http_code}'
@@ -42,6 +44,15 @@ http() {
     fi
     if [[ -n "$key" ]]; then
         args+=(--header "Idempotency-Key: $key")
+    fi
+    if [[ -n "$cookie_in" ]]; then
+        args+=(--cookie "$cookie_in")
+    fi
+    if [[ -n "$cookie_out" ]]; then
+        args+=(--cookie-jar "$cookie_out" --dump-header "$WORK_DIR/headers")
+    fi
+    if [[ -n "$refresh_header" ]]; then
+        args+=(--header 'X-BoardWallet-Refresh: 1')
     fi
     if [[ -n "$token" ]]; then
         printf 'header = "Authorization: Bearer %s"\n' "$token" |
@@ -53,7 +64,8 @@ http() {
 
 request() {
     local expected="$1" method="$2" path="$3" token="${4:-}" payload="${5:-}" key="${6:-}"
-    STATUS=$(http "$method" "$path" "$token" "$payload" "$WORK_DIR/response.json" "$key") ||
+    STATUS=$(http "$method" "$path" "$token" "$payload" "$WORK_DIR/response.json" \
+        "$key" "${7:-}" "${8:-}" "${9:-}") ||
         fail "Cannot reach $BASE_URL. Start the app and check BASE_URL."
     RESPONSE=$(cat "$WORK_DIR/response.json")
     [[ "$STATUS" == "$expected" ]] ||
@@ -82,14 +94,45 @@ credentials() {
         '{username: $username, password: $password}'
 }
 
+refresh_cookie_value() {
+    awk -F '\t' '$6 == "refresh_token" { print $7; exit }' "$1"
+}
+
+assert_refresh_cookie() {
+    local cookie_header attribute
+    cookie_header=$(rg -i '^Set-Cookie: refresh_token=[^;]+' "$WORK_DIR/headers") ||
+        fail 'Expected a refresh cookie'
+    for attribute in HttpOnly Secure 'SameSite=Strict' 'Path=/api/auth'; do
+        [[ "$cookie_header" == *"; $attribute"* ]] ||
+            fail "Refresh cookie is missing $attribute"
+    done
+    [[ -n "$(refresh_cookie_value "$1")" ]] || fail 'curl did not store the refresh cookie'
+}
+
 echo "Testing $BASE_URL with users $CREATOR and $PLAYER"
 request 200 POST /api/auth/register '' "$(credentials "$CREATOR")"
 request 200 POST /api/auth/register '' "$(credentials "$PLAYER")"
 
-request 200 POST /api/auth/login '' "$(credentials "$CREATOR")"
+LOGIN_COOKIE="$WORK_DIR/login.cookies"
+ROTATED_COOKIE="$WORK_DIR/rotated.cookies"
+request 200 POST /api/auth/login '' "$(credentials "$CREATOR")" '' '' "$LOGIN_COOKIE"
+assert_refresh_cookie "$LOGIN_COOKIE"
 CREATOR_TOKEN=$(printf '%s' "$RESPONSE" | jq -er '.accessToken | select(type == "string" and length > 0)')
 request 200 POST /api/auth/login '' "$(credentials "$PLAYER")"
 PLAYER_TOKEN=$(printf '%s' "$RESPONSE" | jq -er '.accessToken | select(type == "string" and length > 0)')
+
+echo 'Testing refresh rotation and reuse detection...'
+request 403 POST /api/auth/refresh '' '' '' "$LOGIN_COOKIE"
+request 401 POST /api/auth/refresh '' '' '' '' '' 1
+request 200 POST /api/auth/refresh '' '' '' "$LOGIN_COOKIE" "$ROTATED_COOKIE" 1
+assert_refresh_cookie "$ROTATED_COOKIE"
+[[ "$(refresh_cookie_value "$LOGIN_COOKIE")" != "$(refresh_cookie_value "$ROTATED_COOKIE")" ]] ||
+    fail 'Refresh must replace the cookie value'
+CREATOR_TOKEN=$(printf '%s' "$RESPONSE" | jq -er '.accessToken | select(type == "string" and length > 0)')
+request 200 GET /api/auth/me "$CREATOR_TOKEN"
+[[ "$RESPONSE" == "$CREATOR" ]] || fail 'Refreshed access token belongs to the wrong user'
+request 401 POST /api/auth/refresh '' '' '' "$LOGIN_COOKIE" '' 1
+request 401 POST /api/auth/refresh '' '' '' "$ROTATED_COOKIE" '' 1
 
 echo 'Testing board-list authentication and empty results...'
 request 401 GET /api/boards
@@ -859,3 +902,15 @@ printf '\nAll board-list, board-start, player-wallet, player-payment, bank-detai
 printf '%s\n' "$RESPONSE" | jq .
 echo "Additional board (also finished): $OTHER_BOARD_ID"
 echo 'This checks API responses, balances, and visible history; direct database checks and forced mid-payment rollback are separate.'
+
+echo 'Testing logout revokes the session and clears its cookie...'
+LOGOUT_COOKIE="$WORK_DIR/logout.cookies"
+request 200 POST /api/auth/login '' "$(credentials "$PLAYER")" '' '' "$LOGOUT_COOKIE"
+assert_refresh_cookie "$LOGOUT_COOKIE"
+request 403 POST /api/auth/logout '' '' '' "$LOGOUT_COOKIE"
+request 204 POST /api/auth/logout '' '' '' "$LOGOUT_COOKIE" "$WORK_DIR/cleared.cookies" 1
+rg -qi '^Set-Cookie: refresh_token=;.*Max-Age=0' "$WORK_DIR/headers" ||
+    fail 'Logout must expire the refresh cookie'
+request 401 POST /api/auth/refresh '' '' '' "$LOGOUT_COOKIE" '' 1
+request 204 POST /api/auth/logout '' '' '' '' '' 1
+echo 'All refresh and logout API checks passed.'
