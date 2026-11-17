@@ -4,8 +4,22 @@ BoardWallet is a multiplayer wallet API for the Business board game. Each board 
 
 ## How a game works
 
+```mermaid
+flowchart TD
+    Login["Register and sign in"] --> Create["Creator opens a board"]
+    Create --> Waiting["WAITING"]
+    Waiting -->|"Share join code"| Join["Players join the board"]
+    Join -->|"Creator starts the game with at least two players total"| Start["Credit each player once and record the starting money"]
+    Start --> Active["ACTIVE"]
+    Active -->|"During play"| Pay["Pay a player or the bank, or claim a bank payout"]
+    Pay --> Record["Update wallet balances and record the payment"]
+    Record --> Active
+    Active -->|"Creator finishes the game"| Finished["FINISHED"]
+    Finished --> History["Members can still view the transaction history"]
+```
+
 - A player creates a board with a starting amount and shares its join code. Other players join while the board is in `WAITING`.
-- The creator starts the game once at least two players have joined. Starting the board moves it to `ACTIVE` and credits each player once, with a starting-money entry in the ledger.
+- The creator starts the game once the board has at least two players, including the creator. Starting the board moves it to `ACTIVE` and credits each player once, with a starting-money entry in the ledger.
 - On an active board, members can pay another player on the same board, pay the bank, or claim a bank payout to their own wallet. A player must have sufficient funds to make a payment.
 - Members can check their own balance, view bank totals, and browse the board's transaction history. The creator can finish the game, moving it to `FINISHED` and closing it to new payments.
 
@@ -63,7 +77,33 @@ Every payment POST requires a UUID in the `Idempotency-Key` header. Generate a n
 - A database transaction commits the balance changes and ledger entry together. Pessimistic wallet locks serialize competing balance changes, and consistent lock ordering reduces the risk of deadlocks.
 - MySQL enforces uniqueness on the initiating user and idempotency key. A stored SHA-256 request fingerprint lets the service return the original result for a matching retry and reject a changed request.
 
-## Checks and benchmarks
+## Local benchmark results
+
+Runs from November 16, 2026 tested app revision `0f6bd07`. The app, MySQL, and k6 shared one Apple Silicon Mac with 8 logical CPUs and 16 GiB of RAM. The synthetic database held **1 million users**, **100,000 active boards**, **2.2 million player wallets**, and **2.2 million starting-money transactions**. k6 rotated through a pool of up to 10,000 test identities.
+
+### Read throughput
+
+k6 measured HTTP latency across board, wallet, and transaction reads. The table shows passing runs, each with zero dropped iterations.
+
+| Target req/s | Duration | Measured req/s | p95 | p99 | Dropped iterations | Result |
+| ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| 100 | 60 s | 100.0 | 25.4 ms | 61.6 ms | 0 | Pass |
+| 250 | 60 s | 250.0 | 15.1 ms | 55.4 ms | 0 | Pass |
+| 500 | 60 s | 500.0 | 7.0 ms | 11.8 ms | 0 | Pass on rerun |
+
+### Payment and access-control checks
+
+| Scenario | Load | Observed result |
+| --- | --- | --- |
+| Two-wallet contention | 500 payments across 50 virtual users | All 500 committed with zero balance mismatches and zero observed deadlocks. Payment p95 was 255.0 ms. |
+| Duplicate payment | 500 requests with the same key and payload across 50 virtual users | All 500 returned success and produced one committed transfer. |
+| Idempotency conflict | 20 requests reused a committed payment's key with a different amount | All 20 returned `409 Conflict`. The original transfer was the only commit. |
+| Concurrent overspend | 20 requests each tried to spend half the initial balance | Two payments committed, 18 were rejected, and balances reconciled with the ledger. |
+| Access and validation | 6 requests expected to be rejected | All six returned the expected status and produced zero transfers. |
+
+These figures describe the recorded local runs. The contention scenario recorded 499 MySQL row-lock waits and 12.9 seconds of cumulative wait time in server-wide counters.
+
+## Checks and reproduction
 
 - Run `./mvnw test` with the local MySQL configuration to exercise the Spring context test.
 - With the app running, execute `bash scripts/test-board-start.sh` for end-to-end API checks. It requires `curl`, `jq`, `rg`, and `uuidgen`, and leaves test users, boards, and payments in MySQL.
