@@ -1,15 +1,27 @@
 # Local benchmark dataset
 
-`seed_dataset.py` populates the configured local `boardwallet` database. It
-refuses nonempty tables and does not contain a database-clearing operation.
-Run while the application and other writers are stopped.
+[BoardWallet project setup](../../README.md) covers database and application configuration.
 
-Create a dedicated Python virtual environment, then install
-`seed-requirements.txt`. From the project directory:
+`seed_dataset.py` populates the configured local `boardwallet` database. It
+requires an initialized schema with empty tables for a fresh seed. Run while
+the application and other writers are stopped.
+
+**Current status.** The seed script still resolves `scripts/` as the project
+root after moving into `scripts/seed/`. The seed and verification commands
+below require that path to be corrected so the script can read the root
+`.env` and Spring configuration.
+
+Create a dedicated Python virtual environment. From the project root, install
+the dependencies and generate the fixture.
 
 ```sh
-python scripts/seed_dataset.py --output /absolute/path/to/private/seed-output
+python -m pip install -r scripts/seed/seed-requirements.txt
+python scripts/seed/seed_dataset.py --output /absolute/path/to/private/seed-output
 ```
+
+The [benchmark runner](../benchmark/README.md) reads its baseline from
+`~/.local/share/boardwallet-seed/full-20261116`. Use that output directory
+when generating the dataset for the current runner.
 
 The default dataset has 1,000,000 enabled users, 100,000 active boards,
 2,200,000 player wallets, 100,000 bank wallets, and 2,200,000 starting-money
@@ -47,7 +59,7 @@ overwrites or ignores duplicate records. Do not run two instances concurrently.
 To repeat database validation without inserts:
 
 ```sh
-python scripts/seed_dataset.py --output /absolute/path/to/private/seed-output --verify-only
+python scripts/seed/seed_dataset.py --output /absolute/path/to/private/seed-output --verify-only
 ```
 
 For a pilot, pass `--users 10000` and a separate output directory. A pilot needs

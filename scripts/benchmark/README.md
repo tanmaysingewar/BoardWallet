@@ -1,5 +1,14 @@
 # BoardWallet local benchmarks
 
+[BoardWallet project setup](../../README.md) covers the app and its API. The
+[dataset guide](../seed/SEEDING.md) describes the test database and fixture
+files used by this harness.
+
+**Current status.** The runner's import path and requirements include still
+refer to the old seed-script location. A fresh setup needs those references
+and the seed script's project root corrected. The offline test command at
+the end supplies the import path explicitly.
+
 This is an extension beyond the course examples. JWT construction matches the
 project's Base64-decoded HS256 key and issuer (the OAuth2 Resource Server pattern
 from Lecture 38). No application source, schema, or security configuration is
@@ -22,11 +31,13 @@ SQL logging would otherwise add substantial console I/O to the benchmark. Keep
 other clients idle and leave server/pool/database settings constant across runs.
 Do not start the load run until the application reports that it has started.
 
-## Installed local tools and commands
+## Tools and commands
 
-k6 is installed through Homebrew. The Python environment is
-`~/.local/share/boardwallet-seed/venv`; dependencies are pinned in requirements.txt.
-The existing million-user dataset is required. Preparation is read-only:
+Use k6, a Python virtual environment, and a local MySQL instance with the
+Performance Schema consumers required by `bench.py`. The examples use
+`~/.local/share/boardwallet-seed/venv`. Dependencies are pinned in
+`requirements.txt`. Preparation reads fixture data and telemetry from MySQL
+and writes the benchmark manifest and query plans to the local output directory.
 
 ```sh
 ~/.local/share/boardwallet-seed/venv/bin/python scripts/benchmark/bench.py prepare
@@ -136,7 +147,8 @@ making claims about deep pagination or long-running boards.
 ## Harness validation
 
 ```sh
-~/.local/share/boardwallet-seed/venv/bin/python -m unittest discover -s scripts/benchmark -p 'test_*.py' -v
+PYTHONPATH="$PWD/scripts/seed" PYTHONDONTWRITEBYTECODE=1 \
+  ~/.local/share/boardwallet-seed/venv/bin/python -m unittest discover -s scripts/benchmark -p 'test_*.py' -v
 ```
 
 Preparation reads the live database and validates fixture/monitor access.
